@@ -724,7 +724,7 @@ def main():
     start_btn = mk_btn(f2, "[ START ]", lambda: do_start())
     start_btn.grid(row=0, column=4, padx=6)
     amnesia = tk.BooleanVar(value=False)
-    tk.Checkbutton(f2, text="amnesia (semmit se mentsen)", variable=amnesia, bg=BG, fg=DIM,
+    tk.Checkbutton(f2, text="amnesia", variable=amnesia, bg=BG, fg=DIM,
                    selectcolor="#001a00", activebackground=BG, activeforeground=FG,
                    font=FONT, command=lambda: setattr(node, "amnesia", amnesia.get())
                    ).grid(row=0, column=5, padx=6)
