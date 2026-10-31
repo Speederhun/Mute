@@ -7,9 +7,10 @@ Hálózati módok:
   TOR    : Tor onion service - NAT-on át működik, az IP-címek rejtve maradnak
 
 Titkosítás:
-  * Ed25519 identitás (opcionálisan jelszóval védve: scrypt + ChaCha20-Poly1305)
-  * X25519 ideiglenes kulcscsere (forward secrecy), aláírt handshake
-  * ChaCha20-Poly1305 csatorna, számláló nonce, 1 KB-os paddinggel (üzenethossz elrejtése)
+  * Noise_XX_25519_ChaChaPoly_SHA256 handshake (noiseprotocol könyvtár):
+    kölcsönös hitelesítés, forward secrecy, az identitások a vezetéken titkosítva
+  * X25519 identitáskulcs (opcionálisan jelszóval védve: scrypt + ChaCha20-Poly1305)
+  * 1 KB-os padding (üzenethossz elrejtése), 512 keretenként kulcsléptetés (rekey)
   * Nincs naplózás, az üzenetek csak memóriában élnek
 """
 import hashlib
@@ -24,26 +25,24 @@ import tempfile
 import threading
 import time
 
-from cryptography.exceptions import InvalidSignature, InvalidTag
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey, Ed25519PublicKey)
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey, X25519PublicKey)
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
+from noise.connection import Keypair, NoiseConnection
 
 APP_DIR = os.path.join(os.path.expanduser("~"), ".mute")
 DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Mute")
 DEFAULT_PORT = 5555
-MAGIC = b"SP2P\x02\x00"
+MAGIC = b"Mute/3 Noise_XX"  # Noise prologue: verzió-összekötés
+NOISE_NAME = b"Noise_XX_25519_ChaChaPoly_SHA256"
 ENC_MAGIC = b"SP2PENC1"
-CHUNK = 256 * 1024
+CHUNK = 60 * 1024            # a Noise-üzenet max 65535 bájt
 PAD = 1024
-MAX_FRAME = CHUNK + 8192
+REKEY_EVERY = 512            # ennyi keretenként léptetjük a kulcsot
+MAX_FRAME = 65535 + 64
 
 T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
 
@@ -167,8 +166,8 @@ def load_identity(app_dir=None, passphrase=None):
                 raise ValueError("Hibás jelszó")
         else:
             raw = blob
-        return Ed25519PrivateKey.from_private_bytes(raw)
-    key = Ed25519PrivateKey.generate()
+        return X25519PrivateKey.from_private_bytes(raw)
+    key = X25519PrivateKey.generate()
     raw = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
     if passphrase:
         salt, nonce = os.urandom(16), os.urandom(12)
@@ -180,52 +179,72 @@ def load_identity(app_dir=None, passphrase=None):
     return key
 
 
-# ---------------------------------------------------------------- handshake
+# ---------------------------------------------------------------- handshake (Noise XX)
+def _hs_send(sock, msg):
+    sock.sendall(struct.pack(">H", len(msg)) + msg)
+
+
+def _hs_recv(sock):
+    (n,) = struct.unpack(">H", recv_exact(sock, 2))
+    if n > 1024:
+        raise ConnectionError("Érvénytelen handshake-üzenet")
+    return recv_exact(sock, n)
+
+
+def _capture_remote_static():
+    """A könyvtár a handshake végén törli az állapotot, így a partner hitelesített
+    statikus kulcsát (rs) az utolsó read_message végén mentjük el."""
+    from noise.state import HandshakeState
+    if getattr(HandshakeState.read_message, "_mute_patched", False):
+        return
+    orig = HandshakeState.read_message
+
+    def read_message(self, message, payload_buffer):
+        try:
+            return orig(self, message, payload_buffer)
+        finally:
+            rs = getattr(self, "rs", None)
+            if hasattr(rs, "public_bytes"):  # kezdetben üres helyőrző objektum
+                self.noise_protocol._mute_rs = bytes(rs.public_bytes)
+
+    read_message._mute_patched = True
+    HandshakeState.read_message = read_message
+
+
+_capture_remote_static()
+
+
 def handshake(sock, ident, initiator):
-    id_pub = raw_pub(ident.public_key())
-    eph = X25519PrivateKey.generate()
-    eph_pub = raw_pub(eph.public_key())
-    L = len(MAGIC)
-
+    """Noise XX: -> e | <- e, ee, s, es | -> s, se. Visszaadja: (partner statikus
+    publikus kulcsa, NoiseConnection a kész átviteli állapottal)."""
+    c = NoiseConnection.from_name(NOISE_NAME)
+    c.set_prologue(MAGIC)
+    c.set_keypair_from_private_bytes(
+        Keypair.STATIC, ident.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()))
     if initiator:
-        sock.sendall(MAGIC + id_pub + eph_pub)
-        m = recv_exact(sock, L + 32 + 32 + 64)
-        if m[:L] != MAGIC:
-            raise ConnectionError("Ismeretlen protokoll")
-        peer_id, peer_eph, sig_r = m[L:L + 32], m[L + 32:L + 64], m[L + 64:]
-        transcript = MAGIC + id_pub + eph_pub + peer_id + peer_eph
-        try:
-            Ed25519PublicKey.from_public_bytes(peer_id).verify(sig_r, b"R" + transcript)
-        except InvalidSignature:
-            raise ConnectionError("Hibás aláírás a másik féltől")
-        sock.sendall(ident.sign(b"I" + transcript))
+        c.set_as_initiator()
+        c.start_handshake()
+        _hs_send(sock, c.write_message())
+        c.read_message(_hs_recv(sock))
+        _hs_send(sock, c.write_message())
     else:
-        m = recv_exact(sock, L + 64)
-        if m[:L] != MAGIC:
-            raise ConnectionError("Ismeretlen protokoll")
-        peer_id, peer_eph = m[L:L + 32], m[L + 32:]
-        transcript = MAGIC + peer_id + peer_eph + id_pub + eph_pub
-        sock.sendall(MAGIC + id_pub + eph_pub + ident.sign(b"R" + transcript))
-        sig_i = recv_exact(sock, 64)
-        try:
-            Ed25519PublicKey.from_public_bytes(peer_id).verify(sig_i, b"I" + transcript)
-        except InvalidSignature:
-            raise ConnectionError("Hibás aláírás a másik féltől")
-
-    shared = eph.exchange(X25519PublicKey.from_public_bytes(peer_eph))
-    okm = HKDF(algorithm=hashes.SHA256(), length=64,
-               salt=hashlib.sha256(transcript).digest(),
-               info=b"SP2P session keys v2").derive(shared)
-    k_i2r, k_r2i = okm[:32], okm[32:]
-    if initiator:
-        return peer_id, ChaCha20Poly1305(k_i2r), ChaCha20Poly1305(k_r2i)
-    return peer_id, ChaCha20Poly1305(k_r2i), ChaCha20Poly1305(k_i2r)
+        c.set_as_responder()
+        c.start_handshake()
+        c.read_message(_hs_recv(sock))
+        _hs_send(sock, c.write_message())
+        c.read_message(_hs_recv(sock))
+    if not c.handshake_finished:
+        raise ConnectionError("A handshake nem fejeződött be")
+    rs = getattr(c.noise_protocol, "_mute_rs", None)
+    if rs is None or len(rs) != 32:
+        raise ConnectionError("A partner kulcsa nem állapítható meg")
+    return rs, c
 
 
 class Channel:
-    def __init__(self, sock, aead_send, aead_recv):
+    def __init__(self, sock, noise):
         self.sock = sock
-        self.aead_send, self.aead_recv = aead_send, aead_recv
+        self.noise = noise
         self.sn = self.rn = 0
         self.lock = threading.Lock()
         self.offset_q = queue.Queue()
@@ -234,19 +253,20 @@ class Channel:
         body = struct.pack(">BI", typ, len(payload)) + payload
         body += b"\0" * ((-len(body)) % PAD)  # hosszrejtés: 1 KB-os egységek
         with self.lock:
-            nonce = self.sn.to_bytes(12, "big")
+            ct = self.noise.encrypt(body)
             self.sn += 1
-            ct = self.aead_send.encrypt(nonce, body, None)
+            if self.sn % REKEY_EVERY == 0:
+                self.noise.rekey_outbound_cipher()  # régi kulcs törlése
             self.sock.sendall(struct.pack(">I", len(ct)) + ct)
 
     def recv(self):
         (n,) = struct.unpack(">I", recv_exact(self.sock, 4))
         if n > MAX_FRAME or n < 16 + 5:
             raise ConnectionError("Érvénytelen keret")
-        ct = recv_exact(self.sock, n)
-        nonce = self.rn.to_bytes(12, "big")
+        pt = self.noise.decrypt(recv_exact(self.sock, n))  # hiba -> kivétel
         self.rn += 1
-        pt = self.aead_recv.decrypt(nonce, ct, None)
+        if self.rn % REKEY_EVERY == 0:
+            self.noise.rekey_inbound_cipher()
         typ, ln = struct.unpack(">BI", pt[:5])
         if 5 + ln > len(pt):
             raise ConnectionError("Érvénytelen hossz")
@@ -409,7 +429,7 @@ class Node:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except OSError:
                 pass
-            peer_pub, a_send, a_recv = handshake(sock, self.ident, initiator)
+            peer_pub, noise = handshake(sock, self.ident, initiator)
             fp = fingerprint(peer_pub)
             if expected_fp and fp.replace(" ", "") != expected_fp.replace(" ", "").lower():
                 raise ConnectionError(f"Az ujjlenyomat NEM egyezik! Kapott: {fp}")
@@ -425,7 +445,7 @@ class Node:
                 if fp in self.chans:
                     raise ConnectionError("Ezzel a partnerrel már van kapcsolat")
                 sock.settimeout(None)
-                chan = Channel(sock, a_send, a_recv)
+                chan = Channel(sock, noise)
                 self.chans[fp] = chan
         except Exception as e:
             self.emit("sys", f"Kapcsolat sikertelen: {e}")

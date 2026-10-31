@@ -25,11 +25,22 @@ Windows .exe: `build_windows.bat` → `dist\Mute.exe`
 5. Nagy fájl: 256 KB-os darabok, sebesség/ETA. Mappa: automatikusan zip. Fogadás: `Downloads/Mute`.
 6. **wipe**: chat törlése. **PANIC**: chat törlés + kapcsolatok bontása + kilépés. **amnesia**: nem ment ismert partnereket.
 
+## Titkosítás
+- Handshake: **Noise_XX_25519_ChaChaPoly_SHA256** (`noiseprotocol` könyvtár). Kölcsönös hitelesítés,
+  forward secrecy, és az identitáskulcsok **titkosítva** mennek át a vezetéken (egy hallgatózó nem látja, ki beszél).
+- Átvitel: ChaCha20-Poly1305, 512 keretenként kulcsléptetés (rekey), a régi kulcs törlődik.
+- Identitás: X25519 kulcs, opcionálisan jelszóval védve (scrypt + ChaCha20-Poly1305).
+- Az ujjlenyomat a statikus publikus kulcs SHA-256 hash-ének első 128 bitje. **Ezt kell egy másik csatornán összevetni.**
+- A korábbi (v2) verzióval nem kompatibilis; az ujjlenyomatok megváltoznak.
+
 ## Mit véd és mit nem
-Véd: tartalom (E2E, forward secrecy), partner-hitelesítés (ujjlenyomat), üzenethossz (1 KB padding),
-lemezes nyom (nincs napló). Tor módban az IP-k és a ki-kivel-beszél is.
+Véd: tartalom (E2E, forward secrecy), partner-hitelesítés (ujjlenyomat), partner-azonosság a vezetéken,
+üzenethossz (1 KB padding), lemezes nyom (nincs napló). Tor módban az IP-k és a ki-kivel-beszél is.
 Nem véd: feltört eszköz/keylogger, ujjlenyomat-egyeztetés kihagyása, a fájlok saját metaadata (EXIF, dokumentum szerző),
 időzítéses elemzés erős támadó ellen, DIRECT módban az IP/forgalom metaadat.
+A lemezen a fogadott fájlok, a `.partial` fájlok és (nem amnesia módban) az ismert partnerek nincsenek titkosítva.
+A kulcsléptetés nem nyújt post-compromise védelmet (nincs teljes double ratchet).
+**Független biztonsági audit nem történt**, érzékeny célra használat előtt érdemes elvégeztetni.
 
 ## Terminál (CLI) mód
 Grafikus felület nélkül (szerveren, SSH-n):
