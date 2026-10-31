@@ -1,0 +1,46 @@
+# Mute on macOS
+
+Tested status: the shared core is tested on Linux. The macOS packaging and these instructions
+have **not** been tested on a real Mac yet - please open an issue if something does not work.
+
+## Run from source
+
+1. Python 3.10+ **with Tkinter**: either the installer from [python.org](https://www.python.org/downloads/macos/)
+   or Homebrew: `brew install python python-tk`.
+2. In the repository folder:
+   ```bash
+   python3 -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
+   python mute.py
+   ```
+   Terminal mode: `python mute.py --listen` (see the main README).
+
+## Build Mute.app
+
+```bash
+bash macos/build.sh      # produces dist/Mute.app
+```
+The app is **unsigned**. On first start use right-click -> Open, or:
+```bash
+xattr -dr com.apple.quarantine dist/Mute.app
+```
+
+## Tor mode
+
+```bash
+brew install tor
+```
+Mute looks for `tor` in `/opt/homebrew/bin` (Apple Silicon), `/usr/local/bin` (Intel), next to
+`Mute.app` in a `tor` folder, and inside `/Applications/Tor Browser.app`.
+Then choose **TOR** and press **START** (or **CONNECT** to a `.onion` address).
+
+### Bridges (hide that you use Tor)
+Click **Tor bridges...** and paste lines from <https://bridges.torproject.org/>
+(obfs4, meek_lite, snowflake). The pluggable-transport programs come with Tor Browser
+(`Tor Browser.app/Contents/MacOS/Tor/PluggableTransports`) - Mute finds them next to the
+Tor Browser `tor` binary - or install `lyrebird` yourself (for example via Homebrew, if available
+for your setup) and make sure it is on your `PATH`.
+
+## Notes
+- Allow incoming connections if macOS asks (DIRECT mode only).
+- The first Tor start can take up to a minute.

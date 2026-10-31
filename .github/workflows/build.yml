@@ -1,0 +1,100 @@
+name: build
+
+# Separate build for every platform: Mute-windows, Mute-linux, Mute-macos.
+# Push a tag like v1.0.0 to attach all three to a GitHub release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r tests/requirements.txt
+      - run: python tests/test_scrub.py
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Build GUI and CLI executables
+        shell: bash
+        run: |
+          OPTS="--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise"
+          python -m PyInstaller $OPTS --windowed --name Mute mute.py
+          python -m PyInstaller $OPTS --name Mute-cli mute.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mute-windows
+          path: |
+            dist/Mute.exe
+            dist/Mute-cli.exe
+
+  linux:
+    needs: test
+    runs-on: ubuntu-22.04   # older glibc -> runs on more distributions
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y python3-tk
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Build binary
+        run: |
+          python -m PyInstaller --onefile --name Mute \
+            --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
+            --collect-submodules noise mute.py
+          chmod +x dist/Mute
+          tar -C dist -czf dist/Mute-linux.tar.gz Mute
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mute-linux
+          path: dist/Mute-linux.tar.gz
+
+  macos:
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - name: Build app bundle
+        run: |
+          python -m PyInstaller --windowed --name Mute \
+            --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
+            --collect-submodules noise mute.py
+          ditto -c -k --sequesterRsrc --keepParent dist/Mute.app dist/Mute-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mute-macos
+          path: dist/Mute-macos.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

@@ -7,3 +7,4 @@ dist/
 identity.key
 known_peers.json
 tor/
+.venv/
