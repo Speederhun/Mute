@@ -16,10 +16,13 @@ Cryptography:
     zip timestamps) before they leave your machine
   * No logs, messages live in memory only
 """
+import base64
 import hashlib
+import hmac
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import socket
@@ -44,6 +47,8 @@ DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Mute")
 DEFAULT_PORT = 5555
 MAGIC = b"Mute/3 Noise_XX"   # Noise prologue: binds both sides to this protocol version
 NOISE_NAME = b"Noise_XX_25519_ChaChaPoly_SHA256"
+NOISE_NAME_PSK = b"Noise_XXpsk3_25519_ChaChaPoly_SHA256"
+KNOWN_MAGIC = b"SP2PKNW1"
 ENC_MAGIC = b"SP2PENC1"
 CHUNK = 60 * 1024            # a Noise message is at most 65535 bytes
 PAD = 1024
@@ -51,6 +56,7 @@ REKEY_EVERY = 512            # ratchet the key every N frames
 MAX_FRAME = 65535 + 64
 
 T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
+T_RELAY, T_COVER = 6, 7
 
 _BAD = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -92,6 +98,32 @@ def fingerprint(pub_bytes):
 
 def short(fp):
     return fp.replace(" ", "")[:8]
+
+
+def normalize_fp(text):
+    """Accepts a fingerprint with any spacing/case, returns the canonical 8x4 hex form."""
+    h = re.sub(r"[^0-9a-fA-F]", "", text or "").lower()
+    if len(h) != 32:
+        raise ValueError("A fingerprint is 32 hex characters (8 groups of 4)")
+    return " ".join(h[i:i + 4] for i in range(0, 32, 4))
+
+
+_CONS, _VOWS = "bdfghklmnprstvwz", "aeio"  # 16 x 4 = 64 syllables = 6 bits each
+
+
+def fp_words(fp):
+    """Pronounceable form of the whole fingerprint (22 syllables = 128 bits) that is easy
+    to read out loud on a phone call: e.g. 'bakofedi nuzolimo ...'."""
+    n = int(fp.replace(" ", ""), 16) << 4  # 128 -> 132 bits
+    syl = []
+    for i in range(22):
+        v = (n >> (132 - 6 * (i + 1))) & 63
+        syl.append(_CONS[v >> 2] + _VOWS[v & 3])
+    words, k = [], 0
+    for size in (4, 4, 4, 4, 3, 3):
+        words.append("".join(syl[k:k + size]))
+        k += size
+    return " ".join(words)
 
 
 def recv_exact(sock, n):
@@ -220,10 +252,13 @@ def _capture_remote_static():
 _capture_remote_static()
 
 
-def handshake(sock, ident, initiator):
-    """Noise XX: -> e | <- e, ee, s, es | -> s, se.
+def handshake(sock, ident, initiator, psk=None):
+    """Noise XX: -> e | <- e, ee, s, es | -> s, se. With a pre-shared secret the XXpsk3
+    variant is used (both sides must use the same secret).
     Returns (peer static public key, NoiseConnection with transport state)."""
-    c = NoiseConnection.from_name(NOISE_NAME)
+    c = NoiseConnection.from_name(NOISE_NAME_PSK if psk else NOISE_NAME)
+    if psk:
+        c.set_psks(psk)
     c.set_prologue(MAGIC)
     c.set_keypair_from_private_bytes(
         Keypair.STATIC, ident.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption()))
@@ -583,9 +618,16 @@ class Node:
     """GUI-independent core. Events are put on the `events` queue."""
 
     def __init__(self, confirm_cb=None, passphrase=None, amnesia=False, app_dir=None,
-                 scrub=True):
+                 scrub=True, burner=False):
         self.app_dir = app_dir or APP_DIR
-        self.ident = load_identity(self.app_dir, passphrase)
+        self.burner = burner
+        self.passphrase = passphrase  # memory only
+        if burner:
+            # throw-away identity: no key file, nothing remembered, new fingerprint every start
+            self.ident = X25519PrivateKey.generate()
+            amnesia = True
+        else:
+            self.ident = load_identity(self.app_dir, passphrase)
         self.my_fp = fingerprint(raw_pub(self.ident.public_key()))
         self.events = queue.Queue()
         self.confirm_cb = confirm_cb
@@ -593,6 +635,13 @@ class Node:
         self.scrub = scrub
         self.bridges = []   # [(line, transport)] - memory only, never written to disk
         self.names = {}     # fp -> nickname chosen by YOU (memory only, never sent or saved)
+        self.closed = False       # closed mode: only allowlisted fingerprints may connect
+        self.psk = None           # optional pre-shared secret (32 bytes, memory only)
+        self.relay = False        # hub mode: forward chat messages between your peers
+        self.cover = False        # send dummy frames to hide when you are idle/active
+        self._cover_thread = None
+        self.client_auth = None   # (private b64, public b32) for onion client authorization
+        self.allowed_clients = [] # onion client public keys allowed to reach your service
         self.chans = {}     # fp -> Channel
         self.state_lock = threading.Lock()
         self.send_lock = threading.Lock()
@@ -606,17 +655,32 @@ class Node:
 
     def _load_known(self):
         try:
-            with open(self.known_path) as f:
-                return set(json.load(f))
-        except (OSError, ValueError):
+            with open(self.known_path, "rb") as f:
+                blob = f.read()
+        except OSError:
+            return set()
+        try:
+            if blob.startswith(KNOWN_MAGIC):
+                if not self.passphrase:
+                    return set()
+                salt, nonce, ct = blob[8:24], blob[24:36], blob[36:]
+                blob = ChaCha20Poly1305(_kdf(self.passphrase, salt)).decrypt(nonce, ct, b"")
+            return set(json.loads(blob))
+        except (ValueError, InvalidTag):
             return set()
 
     def _save_known(self):
         if self.amnesia:
             return
         os.makedirs(self.app_dir, exist_ok=True)
-        with open(self.known_path, "w") as f:
-            json.dump(sorted(self.known), f)
+        raw = json.dumps(sorted(self.known)).encode()
+        if self.passphrase:  # list of people you talk to is protected like the key
+            salt, nonce = os.urandom(16), os.urandom(12)
+            raw = KNOWN_MAGIC + salt + nonce + ChaCha20Poly1305(
+                _kdf(self.passphrase, salt)).encrypt(nonce, raw, b"")
+        fd = os.open(self.known_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
 
     def emit(self, kind, *args):
         self.events.put((kind, *args))
@@ -635,6 +699,76 @@ class Node:
 
     def set_bridges(self, text):
         self.bridges = parse_bridges(text)
+
+    def allow(self, text):
+        """Adds a fingerprint to the trusted list (used by closed mode, skips the prompt)."""
+        fp = normalize_fp(text)
+        self.known.add(fp)
+        self._save_known()
+        return fp
+
+    def set_psk(self, secret):
+        """Pre-shared secret agreed out-of-band. Protects against a man-in-the-middle even
+        if the fingerprint check is skipped. Use a long passphrase (it is stretched with scrypt,
+        but a recorded handshake could be attacked offline if the secret is weak)."""
+        if not secret:
+            self.psk = None
+            return
+        self.psk = Scrypt(salt=b"Mute/psk/v1", length=32, n=2 ** 16, r=8, p=1).derive(secret.encode())
+
+    def set_cover(self, on):
+        self.cover = bool(on)
+        if self.cover and not (self._cover_thread and self._cover_thread.is_alive()):
+            self._cover_thread = threading.Thread(target=self._cover_loop, daemon=True)
+            self._cover_thread.start()
+
+    def _cover_loop(self):
+        rnd = random.SystemRandom()
+        while self.cover:
+            time.sleep(rnd.uniform(2, 9))
+            for ch in list(self.chans.values()):
+                try:
+                    ch.send(T_COVER, os.urandom(rnd.choice([0, 200, 700, 1500])))
+                except OSError:
+                    pass
+
+    def _forward(self, origin, text):
+        payload = json.dumps({"o": origin, "t": text}).encode()
+        for ofp, ch in list(self.chans.items()):
+            if ofp != origin:
+                try:
+                    ch.send(T_RELAY, payload)
+                except OSError:
+                    pass
+
+    # -- onion client authorization (only holders of your key can even find the service)
+    def new_client_auth(self):
+        """Creates a client-auth key pair (memory only). Give the PUBLIC part to whoever runs
+        the onion service; it must be on their allowed list BEFORE they start."""
+        k = X25519PrivateKey.generate()
+        priv = base64.b64encode(k.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())).decode()
+        pub = base64.b32encode(raw_pub(k.public_key())).decode().rstrip("=")
+        self.client_auth = (priv, pub)
+        return pub
+
+    def set_allowed_clients(self, text):
+        keys = []
+        for line in text.splitlines():
+            line = line.strip().upper()
+            if not line or line.startswith("#"):
+                continue
+            if not re.fullmatch(r"[A-Z2-7]{52}", line):
+                raise ValueError("Onion client keys are 52 characters (A-Z and 2-7)")
+            keys.append(line)
+        self.allowed_clients = keys
+
+    def _add_client_auth(self, host):
+        if not (self.client_auth and self.controller and host.endswith(".onion")):
+            return
+        r = self.controller.msg(f"ONION_CLIENT_AUTH_ADD {host[:-6]} x25519:{self.client_auth[0]}")
+        code = r.content()[0][0]
+        if code not in ("250", "251"):
+            raise RuntimeError(f"Tor rejected the client authorization key: {r}")
 
     # -- start Tor + onion service
     def _launch_tor(self, tor_cmd, torrc, timeout=240):
@@ -708,11 +842,25 @@ class Node:
         self._launch_tor(tor_cmd, torrc)
         self.controller = stem.control.Controller.from_port(port=ctrl)
         self.controller.authenticate()
-        svc = self.controller.create_ephemeral_hidden_service(
-            {DEFAULT_PORT: local_port}, await_publication=True,
-            key_type="NEW", key_content="ED25519-V3")
-        self.onion = svc.service_id + ".onion"
+        if self.allowed_clients:
+            # stem only accepts one client key and cannot set the V3Auth flag, so use the raw command
+            cmd = (f"ADD_ONION NEW:ED25519-V3 Flags=DiscardPK,V3Auth Port={DEFAULT_PORT},{local_port} "
+                   + " ".join("ClientAuthV3=" + k for k in self.allowed_clients))
+            r = self.controller.msg(cmd)
+            sid = next((x[2].split("=", 1)[1] for x in r.content() if x[2].startswith("ServiceID=")), None)
+            if not sid:
+                raise RuntimeError(f"Tor refused the restricted onion service: {r}")
+            service_id = sid
+            time.sleep(5)  # let the descriptor upload start
+        else:
+            svc = self.controller.create_ephemeral_hidden_service(
+                {DEFAULT_PORT: local_port}, await_publication=True,
+                key_type="NEW", key_content="ED25519-V3")
+            service_id = svc.service_id
+        self.onion = service_id + ".onion"
         self.transport = "tor"
+        if self.allowed_clients:
+            self.emit("sys", f"Onion service restricted to {len(self.allowed_clients)} client key(s)")
         self.emit("sys", f"Your onion address: {self.onion}")
 
     # -- listen / connect
@@ -757,6 +905,7 @@ class Node:
                 self.emit("sys", f"Connecting to {host}:{port}...")
                 if self.transport == "tor":
                     import socks
+                    self._add_client_auth(host)
                     c = socks.create_connection(
                         (host, port), timeout=90, proxy_type=socks.SOCKS5,
                         proxy_addr="127.0.0.1", proxy_port=self.socks_port,
@@ -777,13 +926,21 @@ class Node:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except OSError:
                 pass
-            peer_pub, noise = handshake(sock, self.ident, initiator)
+            try:
+                peer_pub, noise = handshake(sock, self.ident, initiator, self.psk)
+            except ConnectionError:
+                raise
+            except Exception as e:  # library errors are cryptic - give the likely reasons
+                raise ConnectionError("Handshake failed (shared secret mismatch, different "
+                                      "version, or not a Mute peer)") from e
             fp = fingerprint(peer_pub)
             if expected_fp and fp.replace(" ", "") != expected_fp.replace(" ", "").lower():
                 raise ConnectionError(f"Fingerprint does NOT match! Got: {fp}")
             if fp == self.my_fp:
                 raise ConnectionError("You connected to yourself")
             if fp not in self.known:
+                if self.closed:
+                    raise ConnectionError(f"Rejected {short(fp)}: not on the allowlist")
                 ok = self.confirm_cb(fp) if self.confirm_cb else False
                 if not ok:
                     raise ConnectionError("Peer was not accepted")
@@ -811,7 +968,10 @@ class Node:
             while True:
                 typ, data = chan.recv()
                 if typ == T_MSG:
-                    self.emit("msg", fp, data.decode("utf-8", "replace"))
+                    text = data.decode("utf-8", "replace")
+                    self.emit("msg", fp, text)
+                    if self.relay:
+                        self._forward(fp, text)
                 elif typ == T_FILE_START:
                     if fobj:
                         fobj.close()
@@ -862,6 +1022,15 @@ class Node:
                     self.emit("file", fp, path, ok)
                 elif typ == T_FILE_OFFSET:
                     chan.offset_q.put(struct.unpack(">Q", data[:8])[0])
+                elif typ == T_RELAY:
+                    d = json.loads(data)
+                    try:
+                        origin = normalize_fp(str(d.get("o", "")))
+                    except ValueError:
+                        origin = ""
+                    self.emit("relayed", fp, origin, str(d.get("t", ""))[:4000])
+                elif typ == T_COVER:
+                    pass  # dummy traffic
                 else:
                     raise ConnectionError("Unexpected frame")
         except Exception as e:
@@ -1008,10 +1177,74 @@ BANNER = r"""
 """
 
 
-def main():
+def split_hostport(text, default=DEFAULT_PORT):
+    text = text.strip()
+    if text.count(":") == 1:
+        host, _, prt = text.partition(":")
+        try:
+            return host, int(prt)
+        except ValueError:
+            raise ValueError("Invalid port")
+    return text, default
+
+
+def build_parser():
+    import argparse
+    ap = argparse.ArgumentParser(
+        prog="mute", description="Mute - serverless end-to-end encrypted chat and file transfer. "
+        "Without --cli/--listen/--tor/--connect the GUI starts.")
+    g = ap.add_argument_group("mode")
+    g.add_argument("--cli", action="store_true", help="terminal mode (no GUI)")
+    g.add_argument("--listen", action="store_true", help="wait for incoming connections")
+    g.add_argument("--port", type=int, default=DEFAULT_PORT)
+    g.add_argument("--tor", action="store_true", help="run an onion service / connect through Tor")
+    g.add_argument("--connect", action="append", default=[], metavar="HOST[:PORT]",
+                   help="connect to a peer (repeatable)")
+    g.add_argument("--fp", help="expected peer fingerprint (for --connect)")
+    g = ap.add_argument_group("Tor")
+    g.add_argument("--bridge", action="append", default=[], metavar="LINE",
+                   help="Tor bridge line, e.g. 'obfs4 1.2.3.4:443 FPR cert=... iat-mode=0' (repeatable)")
+    g.add_argument("--bridge-file", metavar="PATH", help="file with Tor bridge lines")
+    g.add_argument("--client-auth", action="store_true",
+                   help="create an onion client key (memory only) and print its public part")
+    g.add_argument("--allow-client", action="append", default=[], metavar="KEY",
+                   help="only these onion client keys (52 chars) can reach your onion service (repeatable)")
+    g = ap.add_argument_group("identity and privacy")
+    g.add_argument("--burner", action="store_true",
+                   help="throw-away identity: random key, nothing saved, new fingerprint every start")
+    g.add_argument("--persistent", action="store_true", help="GUI: skip the identity question, use the saved identity")
+    g.add_argument("--amnesia", action="store_true", help="save nothing")
+    g.add_argument("--no-scrub", action="store_true", help="do not scrub metadata from sent files")
+    g.add_argument("--cover", action="store_true", help="send dummy traffic at random intervals")
+    g = ap.add_argument_group("access control")
+    g.add_argument("--closed", action="store_true", help="only allowlisted fingerprints may connect")
+    g.add_argument("--allow", action="append", default=[], metavar="FP",
+                   help="trusted fingerprint (repeatable; needed for --closed)")
+    g.add_argument("--psk", action="store_true",
+                   help="ask for a pre-shared secret both sides must know (stops man-in-the-middle)")
+    g.add_argument("--relay", action="store_true", help="hub mode: forward chat messages between your peers")
+    return ap
+
+
+def apply_opts(node, args, secret=None):
+    """Applies the shared access-control options to a Node. Raises ValueError on bad input."""
+    node.closed = args.closed
+    node.relay = args.relay
+    for f in args.allow:
+        node.allow(f)
+    if args.allow_client:
+        node.set_allowed_clients("\n".join(args.allow_client))
+    if secret:
+        node.set_psk(secret)
+    if args.cover:
+        node.set_cover(True)
+
+
+def main(args=None):
     import tkinter as tk
     from tkinter import filedialog, messagebox, simpledialog
 
+    args = args or build_parser().parse_args([])
     BG, FG, DIM, ACC, RED = "#000000", "#00ff41", "#0a7a28", "#00e5ff", "#ff3b3b"
     FONT = (("Consolas" if os.name == "nt" else
              "Menlo" if sys.platform == "darwin" else "DejaVu Sans Mono"), 10)
@@ -1019,25 +1252,35 @@ def main():
     root = tk.Tk()
     root.title("Mute")
     root.configure(bg=BG)
-    root.geometry("820x700")
+    root.geometry("860x760")
 
-    # --- unlock / create identity
-    state = identity_state()
+    # --- identity: burner or persistent
+    burner = args.burner
+    if not burner and not args.persistent:
+        ans = messagebox.askyesnocancel(
+            "Identity",
+            "Use a BURNER identity?\n\nYES  = random key, nothing saved, new fingerprint every start\n"
+            "NO   = persistent identity (key file in your profile)", parent=root)
+        if ans is None:
+            return
+        burner = ans
     passphrase = None
-    if state == "encrypted":
-        while True:
-            passphrase = simpledialog.askstring("Unlock", "Identity passphrase:", show="*", parent=root)
-            if passphrase is None:
-                return
-            try:
-                load_identity(None, passphrase)
-                break
-            except ValueError:
-                messagebox.showerror("Error", "Wrong passphrase")
-    elif state == "missing":
-        passphrase = simpledialog.askstring(
-            "New identity", "Set a passphrase for your identity key (empty = none):",
-            show="*", parent=root) or None
+    if not burner:
+        state = identity_state()
+        if state == "encrypted":
+            while True:
+                passphrase = simpledialog.askstring("Unlock", "Identity passphrase:", show="*", parent=root)
+                if passphrase is None:
+                    return
+                try:
+                    load_identity(None, passphrase)
+                    break
+                except ValueError:
+                    messagebox.showerror("Error", "Wrong passphrase")
+        elif state == "missing":
+            passphrase = simpledialog.askstring(
+                "New identity", "Set a passphrase for your identity key (empty = none):",
+                show="*", parent=root) or None
 
     pending = {}
 
@@ -1048,15 +1291,39 @@ def main():
         ev.wait(180)
         return pending["ok"]
 
-    node = Node(confirm_cb, passphrase)
+    node = Node(confirm_cb, passphrase, args.amnesia, scrub=not args.no_scrub, burner=burner)
+
+    # --- option variables
+    closed_var = tk.BooleanVar(value=args.closed)
+    relay_var = tk.BooleanVar(value=args.relay)
+    cover_var = tk.BooleanVar(value=args.cover)
+    notify_var = tk.BooleanVar(value=True)
+    clip_var = tk.BooleanVar(value=True)
+    shot_var = tk.BooleanVar(value=False)
+    clear_min = tk.StringVar(value="0")
+    lock_min = tk.StringVar(value="0")
+    lock_secret = [passphrase]
+    locked = [False]
+    last_active = [time.time()]
+
+    secret = None
+    if args.psk:
+        secret = simpledialog.askstring("Shared secret", "Pre-shared secret (both sides must enter the same):",
+                                        show="*", parent=root)
+    try:
+        apply_opts(node, args, secret)
+    except ValueError as e:
+        messagebox.showerror("Option error", str(e), parent=root)
+        return
 
     def mk_label(parent, text, fg=FG):
         return tk.Label(parent, text=text, bg=BG, fg=fg, font=FONT, anchor="w")
 
-    def mk_entry(parent, var, width=20, show=None):
+    def mk_entry(parent, var, width=20, show=None, state="normal"):
         return tk.Entry(parent, textvariable=var, width=width, bg="#050505", fg=FG,
-                        insertbackground=FG, relief="flat", font=FONT, show=show,
-                        highlightthickness=1, highlightbackground=DIM, highlightcolor=FG)
+                        insertbackground=FG, relief="flat", font=FONT, show=show, state=state,
+                        readonlybackground="#050505", highlightthickness=1,
+                        highlightbackground=DIM, highlightcolor=FG)
 
     def mk_btn(parent, text, cmd, fg=FG):
         return tk.Button(parent, text=text, command=cmd, bg="#001a00", fg=fg, font=FONT,
@@ -1069,40 +1336,64 @@ def main():
                               selectcolor="#001a00", activebackground=BG,
                               activeforeground=FG, font=FONT, command=cmd)
 
+    def copy_text(s):
+        root.clipboard_clear()
+        root.clipboard_append(s)
+        if clip_var.get():
+            def clr():
+                try:
+                    if root.clipboard_get() == s:
+                        root.clipboard_clear()
+                        root.clipboard_append("")
+                except tk.TclError:
+                    pass
+            root.after(30000, clr)
+
     tk.Label(root, text=BANNER, bg=BG, fg=FG, font=("Courier", 9), justify="left").pack(anchor="w", padx=8)
 
     f1 = tk.Frame(root, bg=BG)
     f1.pack(fill="x", padx=8)
     mk_label(f1, "FINGERPRINT>", DIM).grid(row=0, column=0, sticky="w")
     fp_var = tk.StringVar(value=node.my_fp)
-    mk_entry(f1, fp_var, 44).grid(row=0, column=1, padx=6, pady=2)
-    mk_btn(f1, "copy", lambda: (root.clipboard_clear(), root.clipboard_append(node.my_fp))).grid(row=0, column=2)
-    mk_label(f1, "ADDRESS>", DIM).grid(row=1, column=0, sticky="w")
+    mk_entry(f1, fp_var, 52).grid(row=0, column=1, padx=6, pady=2)
+    mk_btn(f1, "copy", lambda: copy_text(node.my_fp)).grid(row=0, column=2)
+    if burner:
+        mk_label(f1, "BURNER", RED).grid(row=0, column=3, padx=6)
+    mk_label(f1, "WORDS>", DIM).grid(row=1, column=0, sticky="w")
+    words_var = tk.StringVar(value=fp_words(node.my_fp))
+    mk_entry(f1, words_var, 52, state="readonly").grid(row=1, column=1, padx=6, pady=2)
+    mk_btn(f1, "copy", lambda: copy_text(words_var.get())).grid(row=1, column=2)
+    mk_label(f1, "ADDRESS>", DIM).grid(row=2, column=0, sticky="w")
     addr_var = tk.StringVar(value=", ".join(local_ips()) or "?")
-    mk_entry(f1, addr_var, 44).grid(row=1, column=1, padx=6, pady=2)
-    mk_btn(f1, "copy", lambda: (root.clipboard_clear(), root.clipboard_append(addr_var.get()))).grid(row=1, column=2)
+    mk_entry(f1, addr_var, 52).grid(row=2, column=1, padx=6, pady=2)
+    mk_btn(f1, "copy", lambda: copy_text(addr_var.get())).grid(row=2, column=2)
 
     f2 = tk.Frame(root, bg=BG)
     f2.pack(fill="x", padx=8, pady=(6, 0))
-    mode = tk.StringVar(value="direct")
+    mode = tk.StringVar(value="tor" if args.tor else "direct")
     for i, (t, v) in enumerate((("DIRECT (IP:port)", "direct"), ("TOR (.onion, anonymous)", "tor"))):
         tk.Radiobutton(f2, text=t, variable=mode, value=v, bg=BG, fg=FG, selectcolor="#001a00",
                        activebackground=BG, activeforeground=FG, font=FONT).grid(row=0, column=i, padx=4)
     mk_label(f2, "port:", DIM).grid(row=0, column=2)
-    port_var = tk.StringVar(value=str(DEFAULT_PORT))
+    port_var = tk.StringVar(value=str(args.port))
     mk_entry(f2, port_var, 6).grid(row=0, column=3, padx=4)
     start_btn = mk_btn(f2, "[ START ]", lambda: do_start())
     start_btn.grid(row=0, column=4, padx=6)
 
     f2b = tk.Frame(root, bg=BG)
     f2b.pack(fill="x", padx=8, pady=(2, 6))
-    amnesia = tk.BooleanVar(value=False)
-    mk_check(f2b, "amnesia (save nothing)", amnesia,
-             lambda: setattr(node, "amnesia", amnesia.get())).pack(side="left", padx=4)
-    scrub_var = tk.BooleanVar(value=True)
+    amnesia = tk.BooleanVar(value=node.amnesia)
+    cb_amn = mk_check(f2b, "amnesia (save nothing)", amnesia,
+                      lambda: setattr(node, "amnesia", amnesia.get()))
+    cb_amn.pack(side="left", padx=4)
+    if burner:
+        cb_amn.config(state="disabled")
+    scrub_var = tk.BooleanVar(value=node.scrub)
     mk_check(f2b, "scrub metadata", scrub_var,
              lambda: setattr(node, "scrub", scrub_var.get())).pack(side="left", padx=4)
     mk_btn(f2b, "Tor bridges...", lambda: edit_bridges(), DIM).pack(side="left", padx=8)
+    mk_btn(f2b, "Options...", lambda: open_options(), ACC).pack(side="left", padx=2)
+    mk_btn(f2b, "LOCK", lambda: lock(), DIM).pack(side="left", padx=8)
 
     f3 = tk.Frame(root, bg=BG)
     f3.pack(fill="x", padx=8)
@@ -1128,6 +1419,7 @@ def main():
     chat.tag_config("err", foreground=RED)
     PALETTE = [ACC, "#ffd166", "#ff6bd6", "#a78bfa", "#ff9f43", "#5eead4", "#f472b6", "#93c5fd"]
     peer_tag = {}
+    chat_lines = []  # (epoch, text, tag) - lets the auto-clear timer remove old lines
 
     def tag_for(fp):
         if fp not in peer_tag:
@@ -1136,7 +1428,16 @@ def main():
             peer_tag[fp] = tag
         return peer_tag[fp]
 
+    def render():
+        chat.config(state="normal")
+        chat.delete("1.0", "end")
+        for ts, text, tag in chat_lines:
+            chat.insert("end", f"[{time.strftime('%H:%M:%S', time.localtime(ts))}] {text}\n", tag)
+        chat.config(state="disabled")
+        chat.see("end")
+
     def log(text, tag="sys"):
+        chat_lines.append((time.time(), text, tag))
         chat.config(state="normal")
         chat.insert("end", f"[{time.strftime('%H:%M:%S')}] {text}\n", tag)
         chat.config(state="disabled")
@@ -1157,28 +1458,232 @@ def main():
     mk_btn(f4, "wipe", lambda: wipe(), ACC).pack(side="left", padx=2)
     mk_btn(f4, "PANIC", lambda: panic(), RED).pack(side="left", padx=2)
 
-    def edit_bridges():
+    # --- lock screen (covers everything; messages keep arriving behind it)
+    lock_frame = tk.Frame(root, bg=BG)
+    tk.Label(lock_frame, text="[ LOCKED ]", bg=BG, fg=FG, font=(FONT[0], 20)).pack(pady=(160, 10))
+    lock_msg = tk.StringVar(value="")
+    lock_var = tk.StringVar()
+    lock_entry = mk_entry(lock_frame, lock_var, 28, show="*")
+    lock_entry.pack()
+    tk.Label(lock_frame, textvariable=lock_msg, bg=BG, fg=RED, font=FONT).pack(pady=6)
+
+    def lock(_=None):
+        if locked[0]:
+            return
+        locked[0] = True
+        lock_var.set("")
+        lock_msg.set("" if lock_secret[0] else "press Enter to unlock (no lock password set)")
+        lock_frame.place(x=0, y=0, relwidth=1, relheight=1)
+        lock_frame.lift()
+        lock_entry.focus_set()
+
+    def unlock(_=None):
+        sec = lock_secret[0]
+        if sec and not hmac.compare_digest(lock_var.get().encode(), sec.encode()):
+            lock_msg.set("wrong password")
+            lock_var.set("")
+            return
+        lock_frame.place_forget()
+        locked[0] = False
+        last_active[0] = time.time()
+        entry.focus_set()
+
+    lock_entry.bind("<Return>", unlock)
+
+    def minutes(var):
+        try:
+            return max(0, int(var.get()))
+        except (ValueError, tk.TclError):
+            return 0
+
+    def idle_check():
+        m = minutes(lock_min)
+        if m and not locked[0] and time.time() - last_active[0] > m * 60:
+            lock()
+        root.after(5000, idle_check)
+
+    def prune_check():
+        m = minutes(clear_min)
+        if m:
+            cut = time.time() - m * 60
+            keep = [l for l in chat_lines if l[0] >= cut]
+            if len(keep) != len(chat_lines):
+                chat_lines[:] = keep
+                render()
+        root.after(5000, prune_check)
+
+    def touch(_=None):
+        last_active[0] = time.time()
+
+    for seq in ("<Key>", "<Motion>", "<ButtonPress>"):
+        root.bind_all(seq, touch, add="+")
+
+    # --- notifications
+    def notify():
+        if not notify_var.get():
+            return
+        if root.focus_displayof() is None or locked[0]:
+            try:
+                root.bell()
+            except tk.TclError:
+                pass
+            root.title("* Mute")
+
+    root.bind("<FocusIn>", lambda e: root.title("Mute"), add="+")
+
+    # --- screenshot / screen-recording block (Windows only)
+    def apply_shot_block():
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
+            on = shot_var.get()
+            res = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x11 if on else 0)
+            if on and not res:
+                res = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 1)
+            log(("Screenshot protection " + ("ON" if on else "OFF")) if res
+                else "Could not change screenshot protection on this Windows version", "sys" if res else "err")
+        except Exception as e:
+            log(f"Screenshot protection failed: {e}", "err")
+
+    # --- dialogs
+    def text_dialog(title, intro, initial, on_save):
         win = tk.Toplevel(root)
-        win.title("Tor bridges")
+        win.title(title)
         win.configure(bg=BG)
-        tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left",
-                 text="One bridge per line (get them at bridges.torproject.org).\n"
-                      "Supported: obfs4, meek_lite, snowflake, plain bridges.\n"
-                      "Kept in memory only; applied the next time Tor starts.").pack(padx=8, pady=6)
+        tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left", text=intro).pack(padx=8, pady=6)
         txt = tk.Text(win, height=8, width=84, bg="#050505", fg=FG, insertbackground=FG,
                       font=FONT, relief="flat", highlightthickness=1, highlightbackground=DIM)
         txt.pack(padx=8)
-        txt.insert("1.0", "\n".join(b[0] for b in node.bridges))
+        txt.insert("1.0", initial)
 
         def save():
             try:
-                node.set_bridges(txt.get("1.0", "end"))
+                on_save(txt.get("1.0", "end"))
             except ValueError as e:
-                return messagebox.showerror("Bridges", str(e), parent=win)
-            note = " (restart the app to apply - Tor is already running)" if node.transport == "tor" else ""
-            log(f"{len(node.bridges)} bridge(s) set{note}")
+                return messagebox.showerror(title, str(e), parent=win)
             win.destroy()
         mk_btn(win, "save", save).pack(pady=8)
+
+    def edit_bridges():
+        def save(text):
+            node.set_bridges(text)
+            note = " (restart the app to apply - Tor is already running)" if node.transport == "tor" else ""
+            log(f"{len(node.bridges)} bridge(s) set{note}")
+        text_dialog("Tor bridges",
+                    "One bridge per line (get them at bridges.torproject.org).\n"
+                    "Supported: obfs4, meek_lite, snowflake, plain bridges.\n"
+                    "Kept in memory only; applied the next time Tor starts.",
+                    "\n".join(b[0] for b in node.bridges), save)
+
+    def edit_allowed_fps():
+        def save(text):
+            added = 0
+            for line in text.splitlines():
+                line = line.split("#")[0].strip()
+                if line:
+                    node.allow(line)
+                    added += 1
+            log(f"{len(node.known)} trusted fingerprint(s) in the allowlist")
+        text_dialog("Allowed fingerprints",
+                    "One fingerprint per line. In closed mode only these peers can connect,\n"
+                    "without any prompt. Everyone else is rejected silently.",
+                    "\n".join(sorted(node.known)), save)
+
+    def edit_allowed_clients():
+        def save(text):
+            node.set_allowed_clients(text)
+            note = " - applies the next time Tor starts" if node.transport != "tor" else " - restart the app to apply"
+            log(f"{len(node.allowed_clients)} allowed onion client key(s){note}")
+        text_dialog("Allowed onion clients",
+                    "One client key per line (52 characters). With keys set, nobody without a matching\n"
+                    "key can even find your onion service. Set this BEFORE pressing START in TOR mode.",
+                    "\n".join(node.allowed_clients), save)
+
+    def show_client_key():
+        pub = node.client_auth[1] if node.client_auth else node.new_client_auth()
+        win = tk.Toplevel(root)
+        win.title("My onion client key")
+        win.configure(bg=BG)
+        tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left",
+                 text="Give this PUBLIC key to the person running the onion service.\n"
+                      "They add it under 'Allowed onion clients' BEFORE starting Tor.\n"
+                      "It is used automatically when you connect to a .onion address.\n"
+                      "The private part stays in memory only (new key every start).").pack(padx=8, pady=6)
+        v = tk.StringVar(value=pub)
+        mk_entry(win, v, 58, state="readonly").pack(padx=8)
+        mk_btn(win, "copy", lambda: copy_text(pub)).pack(pady=8)
+
+    def set_secret():
+        s = simpledialog.askstring(
+            "Shared secret",
+            "Pre-shared secret (empty = none). Both sides must enter the same one\n"
+            "BEFORE connecting. Use a long passphrase.", show="*", parent=root)
+        if s is None:
+            return
+        node.set_psk(s)
+        log("Shared secret " + ("set" if s else "cleared"))
+
+    def set_lock_password():
+        s = simpledialog.askstring("Lock password", "Lock screen password (empty = just press Enter):",
+                                   show="*", parent=root)
+        if s is not None:
+            lock_secret[0] = s or None
+            log("Lock password " + ("set" if s else "cleared"))
+
+    def open_options():
+        win = tk.Toplevel(root)
+        win.title("Options")
+        win.configure(bg=BG)
+        r = 0
+
+        def section(text):
+            nonlocal r
+            tk.Label(win, text="-- " + text + " --", bg=BG, fg=ACC, font=FONT, anchor="w").grid(
+                row=r, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 2))
+            r += 1
+
+        def row(widget, widget2=None):
+            nonlocal r
+            widget.grid(row=r, column=0, sticky="w", padx=8, pady=1)
+            if widget2:
+                widget2.grid(row=r, column=1, sticky="w", padx=4)
+            r += 1
+
+        def spin(var):
+            return tk.Spinbox(win, from_=0, to=999, width=5, textvariable=var, bg="#050505", fg=FG,
+                              buttonbackground="#001a00", insertbackground=FG, font=FONT, relief="flat")
+
+        section("access control")
+        row(mk_check(win, "closed mode (only allowlisted fingerprints connect)", closed_var,
+                     lambda: setattr(node, "closed", closed_var.get())), mk_btn(win, "allowed fingerprints...", edit_allowed_fps, DIM))
+        row(mk_btn(win, "shared secret...", set_secret, DIM))
+        row(mk_check(win, "relay hub (forward messages between my peers)", relay_var,
+                     lambda: setattr(node, "relay", relay_var.get())))
+        section("network privacy")
+        row(mk_check(win, "cover traffic (random dummy frames)", cover_var,
+                     lambda: node.set_cover(cover_var.get())))
+        row(mk_btn(win, "my onion client key...", show_client_key, DIM),
+            mk_btn(win, "allowed onion clients...", edit_allowed_clients, DIM))
+        section("on this computer")
+        row(tk.Label(win, text="auto-clear chat after (minutes, 0 = off)", bg=BG, fg=DIM, font=FONT), spin(clear_min))
+        row(tk.Label(win, text="auto-lock after idle (minutes, 0 = off)", bg=BG, fg=DIM, font=FONT), spin(lock_min))
+        row(mk_btn(win, "lock password...", set_lock_password, DIM))
+        row(mk_check(win, "clear clipboard 30 s after copying", clip_var))
+        row(mk_check(win, "notify when unfocused (beep + title)", notify_var))
+        cs = mk_check(win, "block screenshots / screen recording" + ("" if os.name == "nt" else " (Windows only)"),
+                      shot_var, apply_shot_block)
+        if os.name != "nt":
+            cs.config(state="disabled")
+        row(cs)
+        section("hotkeys")
+        tk.Label(win, bg=BG, fg=DIM, font=FONT, justify="left",
+                 text="Ctrl+L  lock      Ctrl+Shift+Q  PANIC (wipe + exit)      Esc x3  PANIC").grid(
+            row=r, column=0, columnspan=3, sticky="w", padx=8, pady=4)
+        r += 1
+        mk_btn(win, "close", win.destroy).grid(row=r, column=0, pady=10)
 
     def do_start(after=None):
         try:
@@ -1206,12 +1711,8 @@ def main():
         threading.Thread(target=run, daemon=True).start()
 
     def do_connect():
-        host = host_var.get().strip()
-        port_txt = rport_var.get().strip()
-        if host.count(":") == 1:  # pasted "something.onion:5555" or "1.2.3.4:5555"
-            host, port_txt = host.split(":")
         try:
-            port = int(port_txt)
+            host, port = split_hostport(host_var.get(), int(rport_var.get().strip() or DEFAULT_PORT))
         except ValueError:
             return messagebox.showerror("Error", "Invalid port")
         if not host:
@@ -1254,16 +1755,28 @@ def main():
                 log(f"{e}", "err")
 
     def wipe():
-        chat.config(state="normal")
-        chat.delete("1.0", "end")
-        chat.config(state="disabled")
+        chat_lines.clear()
+        render()
 
-    def panic():
+    def panic(_=None):
         wipe()
         node.shutdown()
         os._exit(0)
 
+    esc = []
+
+    def on_escape(_=None):
+        now = time.time()
+        esc[:] = [t for t in esc if now - t < 1.5] + [now]
+        if len(esc) >= 3:
+            panic()
+
     entry.bind("<Return>", do_send)
+    root.bind_all("<Control-l>", lock)
+    root.bind_all("<Control-L>", lock)
+    root.bind_all("<Control-Shift-Q>", panic)
+    root.bind_all("<Control-Shift-q>", panic)
+    root.bind_all("<Escape>", on_escape)
     root.protocol("WM_DELETE_WINDOW", lambda: (node.shutdown(), root.destroy()))
 
     def poll():
@@ -1275,6 +1788,13 @@ def main():
                     log(ev[1])
                 elif k == "msg":
                     log(f"{node.label(ev[1])}> {ev[2]}", tag_for(ev[1]))
+                    notify()
+                elif k == "relayed":
+                    via, origin, text = ev[1], ev[2], ev[3]
+                    if origin != node.my_fp:
+                        who = node.label(origin) if origin else "?"
+                        log(f"{who} (via {node.label(via)})> {text}", tag_for(origin or via))
+                        notify()
                 elif k == "connected":
                     fp = ev[1]
                     name = simpledialog.askstring(
@@ -1287,6 +1807,7 @@ def main():
                         node.names[fp] = name.strip()[:24]
                     log(f"[+] {node.label(fp)} ({short(fp)}) connected securely", tag_for(fp))
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans))
+                    notify()
                 elif k == "disconnected":
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans)
                                    if node.chans else "offline")
@@ -1307,10 +1828,12 @@ def main():
                 elif k == "file":
                     log(("[+] file received: " if ev[3] else "[!] DAMAGED file: ") + ev[2],
                         "me" if ev[3] else "err")
+                    notify()
                 elif k == "confirm":
                     ok = messagebox.askyesno(
                         "New peer",
                         "Unknown peer fingerprint:\n\n" + ev[1] +
+                        "\n\nWords (easy to read aloud):\n" + fp_words(ev[1]) +
                         "\n\nCompare it over a DIFFERENT channel (phone, in person).\nAccept?")
                     pending["ok"] = ok
                     pending["ev"].set()
@@ -1318,57 +1841,62 @@ def main():
             pass
         root.after(80, poll)
 
-    log("Share your fingerprint over a trusted channel. Nothing is written to disk.")
+    if args.closed and not node.known:
+        log("Closed mode is on but the allowlist is empty - nobody can connect. Options > allowed fingerprints.", "err")
+    if args.client_auth:
+        log("Your onion client key (give it to the service owner): " + node.new_client_auth())
+    log("Share your fingerprint over a trusted channel. Nothing is written to disk."
+        if burner or node.amnesia else "Share your fingerprint over a trusted channel.")
     poll()
+    idle_check()
+    prune_check()
     root.mainloop()
 
 
 # ---------------------------------------------------------------- CLI mode
-def cli_main(argv):
-    import argparse
+def cli_main(args):
     import getpass
 
-    ap = argparse.ArgumentParser(prog="mute", description="Mute - terminal mode")
-    ap.add_argument("--cli", action="store_true", help="terminal mode (no GUI)")
-    ap.add_argument("--listen", action="store_true", help="wait for incoming connections")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
-    ap.add_argument("--tor", action="store_true",
-                    help="run an onion service / connect through Tor")
-    ap.add_argument("--connect", action="append", default=[], metavar="HOST[:PORT]",
-                    help="connect to a peer (repeatable)")
-    ap.add_argument("--fp", help="expected peer fingerprint (for --connect)")
-    ap.add_argument("--bridge", action="append", default=[], metavar="LINE",
-                    help="Tor bridge line, e.g. 'obfs4 1.2.3.4:443 FPR cert=... iat-mode=0' (repeatable)")
-    ap.add_argument("--bridge-file", metavar="PATH", help="file with Tor bridge lines")
-    ap.add_argument("--no-scrub", action="store_true", help="do not scrub metadata from sent files")
-    ap.add_argument("--amnesia", action="store_true", help="save nothing")
-    args = ap.parse_args(argv)
-
-    state = identity_state()
     pw = None
-    if state == "encrypted":
-        while True:
-            pw = getpass.getpass("Identity passphrase: ")
-            try:
-                load_identity(None, pw)
-                break
-            except ValueError:
-                print("Wrong passphrase")
-    elif state == "missing":
-        pw = getpass.getpass("New identity passphrase (empty = none): ") or None
+    if not args.burner:
+        state = identity_state()
+        if state == "encrypted":
+            while True:
+                pw = getpass.getpass("Identity passphrase: ")
+                try:
+                    load_identity(None, pw)
+                    break
+                except ValueError:
+                    print("Wrong passphrase")
+        elif state == "missing":
+            pw = getpass.getpass("New identity passphrase (empty = none): ") or None
+    secret = getpass.getpass("Shared secret: ") if args.psk else None
 
     answer = {"ev": None, "val": None}
 
     def confirm_cb(fp):
         answer["ev"], answer["val"] = threading.Event(), False
-        print(f"\n[?] Unknown peer fingerprint:\n    {fp}\n"
+        print(f"\n[?] Unknown peer fingerprint:\n    {fp}\n    words: {fp_words(fp)}\n"
               "    Compare it over a DIFFERENT channel. Accept? (y/n)")
         answer["ev"].wait(180)
         return answer["val"]
 
-    node = Node(confirm_cb, pw, args.amnesia, scrub=not args.no_scrub)
+    node = Node(confirm_cb, pw, args.amnesia, scrub=not args.no_scrub, burner=args.burner)
     print(BANNER)
     print("Your fingerprint:", node.my_fp)
+    print("Your words:      ", fp_words(node.my_fp))
+    if args.burner:
+        print("(burner identity: random key, nothing saved)")
+
+    try:
+        apply_opts(node, args, secret)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return
+    if args.closed and not node.known:
+        print("[!] Closed mode with an empty allowlist: nobody can connect. Use --allow FP or /allow FP.")
+    if args.client_auth:
+        print("Your onion client key (give it to the service owner):", node.new_client_auth())
 
     bridge_text = "\n".join(args.bridge)
     if args.bridge_file:
@@ -1389,6 +1917,9 @@ def cli_main(argv):
                 print(f"[*] {ev[1]}")
             elif k == "msg":
                 print(f"{node.label(ev[1])}> {ev[2]}")
+            elif k == "relayed":
+                if ev[2] != node.my_fp:
+                    print(f"{node.label(ev[2]) if ev[2] else '?'} (via {node.label(ev[1])})> {ev[3]}")
             elif k == "connected":
                 print(f"[+] {node.label(ev[1])} connected securely")
             elif k == "disconnected":
@@ -1407,14 +1938,15 @@ def cli_main(argv):
             node.listen(args.port)
             print("Your IPs:", ", ".join(local_ips()) or "?", f"(port {args.port})")
         for c in args.connect:
-            host, _, prt = c.rpartition(":") if c.count(":") == 1 else (c, "", "")
-            node.connect(host or c, int(prt) if prt else DEFAULT_PORT, args.fp)
+            host, port = split_hostport(c)
+            node.connect(host, port, args.fp)
     except Exception as e:
         print(f"Error: {e}")
         node.shutdown()
         return
 
-    print("Commands: /send <file|folder>  /peers  /name <id> <name>  /fp  /quit   (other text goes to everyone)")
+    print("Commands: /send <file|folder>  /connect <host[:port]> [fp]  /peers  /name <id> <name>  /fp  /words\n"
+          "          /allow <fp>  /relay on|off  /cover on|off  /quit      (other text goes to everyone)")
     try:
         for line in sys.stdin:
             line = line.rstrip("\n")
@@ -1425,6 +1957,28 @@ def cli_main(argv):
                 break
             elif line == "/fp":
                 print(node.my_fp)
+            elif line == "/words":
+                print(fp_words(node.my_fp))
+            elif line.startswith("/allow "):
+                try:
+                    print("[*] trusted:", node.allow(line[7:]))
+                except ValueError:
+                    print("[!] That is not a valid fingerprint (32 hex characters)")
+            elif line.startswith("/relay ") or line.startswith("/cover "):
+                cmd, _, val = line.partition(" ")
+                on = val.strip().lower() in ("on", "1", "yes")
+                if cmd == "/relay":
+                    node.relay = on
+                else:
+                    node.set_cover(on)
+                print(f"[*] {cmd[1:]} {'on' if on else 'off'}")
+            elif line.startswith("/connect "):
+                parts = line.split()
+                try:
+                    host, port = split_hostport(parts[1])
+                    node.connect(host, port, " ".join(parts[2:]) or None)
+                except (ValueError, IndexError) as e:
+                    print(f"[!] {e}")
             elif line.startswith("/name "):
                 parts = line.split(None, 2)
                 fp = node.find_peer(parts[1]) if len(parts) == 3 else None
@@ -1450,8 +2004,14 @@ def cli_main(argv):
     node.shutdown()
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        cli_main(sys.argv[1:])
+def entry(argv=None):
+    """Console entry point: terminal mode if any terminal flag is given, otherwise the GUI."""
+    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    if args.cli or args.listen or args.tor or args.connect:
+        cli_main(args)
     else:
-        main()
+        main(args)
+
+
+if __name__ == "__main__":
+    entry()

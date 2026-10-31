@@ -2,7 +2,8 @@
 rem Builds Mute.exe (GUI) and Mute-cli.exe (console) into dist\
 rem Run from anywhere; the script switches to the repository root.
 cd /d "%~dp0.."
-python -m pip install -r requirements.txt pyinstaller || goto :error
+python -m pip install --require-hashes -r requirements.lock || goto :error
+python -m pip install pyinstaller || goto :error
 
 set OPTS=--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise
 

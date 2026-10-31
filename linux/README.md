@@ -13,7 +13,7 @@ Requirements: Python 3.10+, Tkinter (for the GUI), and `tor` for Tor mode.
 ```bash
 git clone https://github.com/Speederhun/Mute-.git && cd Mute-
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 python mute.py                      # GUI
 python mute.py --listen             # terminal mode, DIRECT, port 5555
 python mute.py --tor                # terminal mode, onion service
@@ -21,6 +21,15 @@ python mute.py --tor --connect abcd...xyz.onion
 ```
 A virtual environment is the safe route on modern distributions: system Python is usually
 "externally managed" and refuses `pip install` outside a venv.
+
+## Install as a command with pipx
+
+```bash
+pipx install git+https://github.com/Speederhun/Mute-.git
+mute                 # GUI (needs Tkinter from your distribution)
+mute --listen        # terminal mode
+```
+Arch: `sudo pacman -S python-pipx`; Kali/Debian: `sudo apt install pipx`; then `pipx ensurepath` and open a new shell.
 
 ## Single-file binary (optional)
 

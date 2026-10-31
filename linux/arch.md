@@ -21,7 +21,7 @@ git clone https://github.com/Speederhun/Mute-.git
 cd Mute-
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 ```
 (`noiseprotocol` has no official Arch package, which is why pip inside the venv is used.)
 
@@ -33,6 +33,12 @@ python mute.py --listen --port 5555    # terminal mode, DIRECT
 python mute.py --tor                   # terminal mode, onion service
 ```
 Next time just `cd Mute- && source .venv/bin/activate`.
+
+**Alternative - pipx** (`sudo pacman -S python-pipx`):
+```bash
+pipx install git+https://github.com/Speederhun/Mute-.git
+mute
+```
 
 ## Optional: bridges (hide that you use Tor)
 

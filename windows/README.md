@@ -10,10 +10,18 @@ if something does not work.
    (tick **"Add python.exe to PATH"**; Tcl/Tk is included by default).
 2. In the repository folder:
    ```bat
-   python -m pip install -r requirements.txt
+   python -m pip install --require-hashes -r requirements.lock
    python mute.py
    ```
    Terminal mode: `python mute.py --listen` (see the main README for all options).
+
+### Option A2 - install as a command with pipx
+```bat
+python -m pip install --user pipx
+python -m pipx ensurepath
+pipx install git+https://github.com/Speederhun/Mute-.git
+mute
+```
 
 ## Option B - build the .exe
 
@@ -42,3 +50,7 @@ keep that folder next to `tor`, Mute finds it automatically.
 ## Firewall
 DIRECT mode needs an inbound TCP rule for the port you listen on (default 5555);
 Windows will prompt on first start. Tor mode needs no inbound rule.
+
+## Privacy options specific to Windows
+**Options... > block screenshots / screen recording** sets the window display-affinity flag, so ordinary screen capture
+shows a black window. It does not stop a camera or malware. This feature has not been tested on a real Windows machine yet.

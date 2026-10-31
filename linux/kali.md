@@ -22,7 +22,7 @@ git clone https://github.com/Speederhun/Mute-.git
 cd Mute-
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 ```
 Run as your normal user - there is no reason to use root.
 
@@ -34,6 +34,12 @@ python mute.py --listen --port 5555    # terminal mode, DIRECT
 python mute.py --tor                   # terminal mode, onion service
 ```
 Next time: `cd Mute- && source .venv/bin/activate`.
+
+**Alternative - pipx** (`sudo apt install pipx`, then `pipx ensurepath` and a new shell):
+```bash
+pipx install git+https://github.com/Speederhun/Mute-.git
+mute
+```
 
 ## Optional: bridges (hide that you use Tor)
 

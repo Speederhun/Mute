@@ -11,14 +11,41 @@ on:
 
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies (hash-checked)
+        run: pip install --require-hashes -r requirements.lock
+      - run: pip install -r tests/requirements.txt
+      - run: python tests/test_scrub.py
+      - run: python tests/test_loopback.py
+      - run: python tests/test_fuzz.py
+      - name: Package installs and starts
+        run: |
+          pip install --no-deps .
+          mute --help
+
+  security:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt -r tests/requirements.txt
-      - run: python tests/test_scrub.py
+      - run: pip install bandit pip-audit
+      - name: Static analysis
+        run: bandit -q -r mute.py -ll
+        continue-on-error: true
+      - name: Known vulnerabilities in dependencies
+        run: pip-audit --require-hashes -r requirements.lock
+        continue-on-error: true
 
   windows:
     needs: test
@@ -28,7 +55,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pyinstaller
       - name: Build GUI and CLI executables
         shell: bash
         run: |
@@ -51,7 +79,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y python3-tk
-      - run: pip install -r requirements.txt pyinstaller
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pyinstaller
       - name: Build binary
         run: |
           python -m PyInstaller --onefile --name Mute \
@@ -72,7 +101,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pyinstaller
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pyinstaller
       - name: Build app bundle
         run: |
           python -m PyInstaller --windowed --name Mute \

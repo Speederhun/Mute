@@ -10,10 +10,18 @@ have **not** been tested on a real Mac yet - please open an issue if something d
 2. In the repository folder:
    ```bash
    python3 -m venv .venv && source .venv/bin/activate
-   pip install -r requirements.txt
+   pip install --require-hashes -r requirements.lock
    python mute.py
    ```
    Terminal mode: `python mute.py --listen` (see the main README).
+
+## Install as a command with pipx
+
+```bash
+brew install pipx python-tk && pipx ensurepath
+pipx install git+https://github.com/Speederhun/Mute-.git
+mute
+```
 
 ## Build Mute.app
 
