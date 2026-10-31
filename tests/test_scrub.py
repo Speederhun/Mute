@@ -96,4 +96,10 @@ cfg = m.build_tor_config("/tmp/d", 9050, 9051, b, {"obfs4,meek_lite": "/usr/bin/
 ok(cfg["UseBridges"] == "1" and len(cfg["Bridge"]) == 3 and "obfs4,meek_lite exec /usr/bin/lyrebird" in cfg["ClientTransportPlugin"], "torrc config built")
 ok("UseBridges" not in m.build_tor_config("/tmp/d", 1, 2), "no bridges -> plain config")
 
+# ---- torrc text
+t = m.torrc_text(m.build_tor_config("C:\\Users\\A B\\tmp", 9050, 9051, b, {"obfs4,meek_lite": "C:\\Program Files\\Tor\\lyrebird.exe"}))
+ok('DataDirectory "C:/Users/A B/tmp"' in t, "windows path with spaces is quoted and uses forward slashes")
+ok('ClientTransportPlugin obfs4,meek_lite exec "C:/Program Files/Tor/lyrebird.exe"' in t, "plugin path with spaces quoted")
+ok(t.count("\nBridge ") == len(b) and "CookieAuthentication 1" in t and "__OwningControllerProcess" in t, "bridges repeated, cookie auth on, owner pid set")
+
 print("all scrub/bridge tests passed")

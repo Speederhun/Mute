@@ -15,6 +15,10 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 - **Files and folders**: large files in chunks with speed/ETA, **resumable** after an interruption, folders sent as a clean zip.
 - **Metadata scrubbing** (on by default) for outgoing files - see below.
 - **Group chat**: connect to several peers; messages and files go to everyone you are connected to (full mesh, no relaying).
+- **Know who is writing**: every peer is identified by its cryptographic key. When someone connects you give them a name
+  (only you see it; it is not sent, not saved, and a peer cannot choose or fake it). Each peer gets its own colour.
+  Unnamed peers show an 8-character ID derived from their key. In group chats name everyone as soon as you have
+  verified their fingerprint.
 - **Leave no trace**: no chat logs, optional amnesia mode, **wipe** clears the chat window, **PANIC** wipes and exits.
 - **Passphrase-protected identity key** (scrypt + ChaCha20-Poly1305).
 - Runs on **Windows, Linux and macOS** from one Python file (`mute.py`).
@@ -64,7 +68,7 @@ python mute.py --tor --bridge "obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0"
 python mute.py --tor --bridge-file bridges.txt
 ```
 Options: `--fp <fingerprint>` (expected peer), `--no-scrub`, `--amnesia`.
-Commands inside: `/send <file|folder>`, `/peers`, `/fp`, `/quit`; any other text is sent to everyone.
+Commands inside: `/send <file|folder>`, `/peers`, `/name <id-or-name> <new name>`, `/fp`, `/quit`; any other text is sent to everyone.
 
 ## Metadata scrubbing
 

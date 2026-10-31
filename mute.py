@@ -24,6 +24,7 @@ import re
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
@@ -505,6 +506,8 @@ def find_tor():
                      "tor-browser", "Browser", "TorBrowser", "Tor", "tor"),
         # macOS: Homebrew (Apple Silicon / Intel) and Tor Browser
         "/opt/homebrew/bin/tor", "/usr/local/bin/tor",
+        # Linux: GUI launchers often lack /usr/sbin in PATH
+        "/usr/bin/tor", "/usr/sbin/tor",
         "/Applications/Tor Browser.app/Contents/MacOS/Tor/tor.real",
     ]
     for c in cands:
@@ -543,14 +546,33 @@ def parse_bridges(text):
     return out
 
 
+def _tq(path):
+    """Quotes a path for torrc (forward slashes work everywhere, also on Windows)."""
+    p = path.replace("\\", "/").replace('"', "")
+    return f'"{p}"' if " " in p or p != path else p
+
+
+def torrc_text(cfg):
+    lines = []
+    for key, val in cfg.items():
+        for item in (val if isinstance(val, list) else [val]):
+            lines.append(f"{key} {item}")
+    return "\n".join(lines) + "\n"
+
+
 def build_tor_config(data_dir, socks_port, ctrl_port, bridges=(), pt_paths=None):
     """Builds the torrc options dict (values may be lists for repeated options)."""
     cfg = {"SocksPort": str(socks_port), "ControlPort": str(ctrl_port),
-           "DataDirectory": data_dir, "Log": "NOTICE stdout"}
+           "DataDirectory": _tq(data_dir), "Log": "NOTICE stdout",
+           # control port is protected by a cookie file readable only by this user
+           "CookieAuthentication": "1",
+           "CookieAuthFile": _tq(os.path.join(data_dir, "control_auth_cookie")),
+           # tor exits by itself if Mute dies
+           "__OwningControllerProcess": str(os.getpid())}
     if bridges:
         cfg["UseBridges"] = "1"
         cfg["Bridge"] = [b[0] for b in bridges]
-        plugins = [f"{t} exec {p}" for t, p in (pt_paths or {}).items()]
+        plugins = [f"{t} exec {_tq(p)}" for t, p in (pt_paths or {}).items()]
         if plugins:
             cfg["ClientTransportPlugin"] = plugins
     return cfg
@@ -570,6 +592,7 @@ class Node:
         self.amnesia = amnesia
         self.scrub = scrub
         self.bridges = []   # [(line, transport)] - memory only, never written to disk
+        self.names = {}     # fp -> nickname chosen by YOU (memory only, never sent or saved)
         self.chans = {}     # fp -> Channel
         self.state_lock = threading.Lock()
         self.send_lock = threading.Lock()
@@ -598,13 +621,59 @@ class Node:
     def emit(self, kind, *args):
         self.events.put((kind, *args))
 
+    def label(self, fp):
+        """Display name: your own nickname for this key, else the key's short ID."""
+        return self.names.get(fp) or short(fp)
+
+    def find_peer(self, ident):
+        """Finds a connected peer by nickname or by the start of its short ID."""
+        ident = ident.strip().lower()
+        for fp in self.chans:
+            if short(fp).startswith(ident) or self.names.get(fp, "").lower() == ident:
+                return fp
+        return None
+
     def set_bridges(self, text):
         self.bridges = parse_bridges(text)
 
     # -- start Tor + onion service
+    def _launch_tor(self, tor_cmd, torrc, timeout=240):
+        """Starts tor ourselves (stem's launcher refuses timeouts on Windows and outside
+        the main thread) and waits for 100% bootstrap or fails with the tor log."""
+        kw = {}
+        if os.name == "nt":
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.Popen([tor_cmd, "-f", torrc], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, bufsize=1, **kw)
+        self.tor_proc = proc
+        state, done, tail = {"ok": False}, threading.Event(), []
+
+        def reader():
+            for line in proc.stdout:  # keeps draining so tor never blocks on a full pipe
+                line = line.rstrip()
+                tail.append(line)
+                del tail[:-40]
+                if "Bootstrapped" in line:
+                    self.emit("sys", line.split("]", 1)[-1].strip())
+                    if "Bootstrapped 100%" in line:
+                        state["ok"] = True
+                        done.set()
+            done.set()  # tor exited
+        threading.Thread(target=reader, daemon=True).start()
+        done.wait(timeout)
+        if not state["ok"]:
+            problems = [ln.split("]", 1)[-1].strip() for ln in tail
+                        if "[warn]" in ln or "[err]" in ln][-3:]
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            why = "exited" if proc.poll() is not None else f"did not finish bootstrapping in {timeout}s"
+            raise RuntimeError(f"Tor {why}. " + " | ".join(problems))
+
     def start_tor(self, local_port):
         import stem.control
-        import stem.process
         tor_cmd = find_tor()
         if not tor_cmd:
             raise RuntimeError(
@@ -632,16 +701,11 @@ class Node:
         self.emit("sys", "Starting Tor (this can take up to a minute)...")
         self.tor_dir = tempfile.mkdtemp(prefix="mute_tor_")
         self.socks_port, ctrl = free_port(), free_port()
-
-        def handler(line):
-            if "Bootstrapped" in line:
-                self.emit("sys", line.split("]")[-1].strip())
-
-        self.tor_proc = stem.process.launch_tor_with_config(
-            tor_cmd=tor_cmd,
-            config=build_tor_config(self.tor_dir, self.socks_port, ctrl,
-                                    self.bridges, plugin_cfg),
-            init_msg_handler=handler, timeout=240, take_ownership=True)
+        torrc = os.path.join(self.tor_dir, "torrc")
+        with open(torrc, "w", encoding="utf-8") as f:
+            f.write(torrc_text(build_tor_config(self.tor_dir, self.socks_port, ctrl,
+                                                self.bridges, plugin_cfg)))
+        self._launch_tor(tor_cmd, torrc)
         self.controller = stem.control.Controller.from_port(port=ctrl)
         self.controller.authenticate()
         svc = self.controller.create_ephemeral_hidden_service(
@@ -803,7 +867,7 @@ class Node:
         except Exception as e:
             if fobj:
                 fobj.close()
-            self.emit("sys", f"{short(fp)} disconnected: {e}")
+            self.emit("sys", f"{self.label(fp)} disconnected: {e}")
         finally:
             with self.state_lock:
                 if self.chans.get(fp) is chan:
@@ -823,7 +887,7 @@ class Node:
             try:
                 ch.send(T_MSG, text.encode("utf-8"))
             except OSError as e:
-                self.emit("sys", f"{short(fp)}: send error: {e}")
+                self.emit("sys", f"{self.label(fp)}: send error: {e}")
 
     def send_file(self, path):
         targets = list(self.chans.items())
@@ -872,9 +936,9 @@ class Node:
                             if not 0 <= offset <= size:
                                 raise ConnectionError("Invalid resume offset")
                             if offset:
-                                self.emit("sys", f"{short(fp)}: resuming from {human(offset)}")
+                                self.emit("sys", f"{self.label(fp)}: resuming from {human(offset)}")
                             sent, last, t0 = offset, 0, time.time()
-                            label = f"TX {short(fp)} {name}" if multi else f"TX {name}"
+                            label = f"TX {self.label(fp)} {name}" if multi else f"TX {name}"
                             with open(p, "rb") as f:
                                 f.seek(offset)
                                 while True:
@@ -890,9 +954,9 @@ class Node:
                                                   (sent - offset) / max(now - t0, 1e-6))
                             ch.send(T_FILE_END)
                             self.emit("progress", label, size, size, 0)
-                            self.emit("sys", f"Sent to {short(fp)}: {name} ({human(size)})")
+                            self.emit("sys", f"Sent to {self.label(fp)}: {name} ({human(size)})")
                         except Exception as e:
-                            self.emit("sys", f"{short(fp)}: transfer interrupted ({e}); "
+                            self.emit("sys", f"{self.label(fp)}: transfer interrupted ({e}); "
                                              "sending again will resume")
 
                     ths = [threading.Thread(target=to_peer, args=t, daemon=True)
@@ -1062,6 +1126,15 @@ def main():
     chat.tag_config("peer", foreground=ACC)
     chat.tag_config("sys", foreground=DIM)
     chat.tag_config("err", foreground=RED)
+    PALETTE = [ACC, "#ffd166", "#ff6bd6", "#a78bfa", "#ff9f43", "#5eead4", "#f472b6", "#93c5fd"]
+    peer_tag = {}
+
+    def tag_for(fp):
+        if fp not in peer_tag:
+            tag = f"peer{len(peer_tag)}"
+            chat.tag_config(tag, foreground=PALETTE[len(peer_tag) % len(PALETTE)])
+            peer_tag[fp] = tag
+        return peer_tag[fp]
 
     def log(text, tag="sys"):
         chat.config(state="normal")
@@ -1201,12 +1274,22 @@ def main():
                 if k == "sys":
                     log(ev[1])
                 elif k == "msg":
-                    log(f"{short(ev[1])}> {ev[2]}", "peer")
+                    log(f"{node.label(ev[1])}> {ev[2]}", tag_for(ev[1]))
                 elif k == "connected":
-                    log(f"[+] {short(ev[1])} connected securely", "me")
-                    status_var.set(f"online · {len(node.chans)} peer(s)")
+                    fp = ev[1]
+                    name = simpledialog.askstring(
+                        "Name this peer",
+                        f"Peer {short(fp)} connected securely.\n"
+                        "Give it a name (only you see it, it is not sent or saved).\n"
+                        "The ID is derived from their key and cannot be faked.",
+                        initialvalue=node.names.get(fp, ""), parent=root)
+                    if name and name.strip():
+                        node.names[fp] = name.strip()[:24]
+                    log(f"[+] {node.label(fp)} ({short(fp)}) connected securely", tag_for(fp))
+                    status_var.set("online · " + ", ".join(node.label(f) for f in node.chans))
                 elif k == "disconnected":
-                    status_var.set(f"online · {len(node.chans)} peer(s)" if node.chans else "offline")
+                    status_var.set("online · " + ", ".join(node.label(f) for f in node.chans)
+                                   if node.chans else "offline")
                 elif k == "addr":
                     addr_var.set(ev[1])
                 elif k == "enable_start":
@@ -1305,11 +1388,11 @@ def cli_main(argv):
             if k == "sys":
                 print(f"[*] {ev[1]}")
             elif k == "msg":
-                print(f"{short(ev[1])}> {ev[2]}")
+                print(f"{node.label(ev[1])}> {ev[2]}")
             elif k == "connected":
-                print(f"[+] {short(ev[1])} connected securely")
+                print(f"[+] {node.label(ev[1])} connected securely")
             elif k == "disconnected":
-                print(f"[-] {short(ev[1])} disconnected")
+                print(f"[-] {node.label(ev[1])} disconnected")
             elif k == "file":
                 print(("[+] File received: " if ev[3] else "[!] DAMAGED file: ") + ev[2])
     threading.Thread(target=printer, daemon=True).start()
@@ -1331,7 +1414,7 @@ def cli_main(argv):
         node.shutdown()
         return
 
-    print("Commands: /send <file|folder>  /peers  /fp  /quit   (any other text is sent to everyone)")
+    print("Commands: /send <file|folder>  /peers  /name <id> <name>  /fp  /quit   (other text goes to everyone)")
     try:
         for line in sys.stdin:
             line = line.rstrip("\n")
@@ -1342,8 +1425,16 @@ def cli_main(argv):
                 break
             elif line == "/fp":
                 print(node.my_fp)
+            elif line.startswith("/name "):
+                parts = line.split(None, 2)
+                fp = node.find_peer(parts[1]) if len(parts) == 3 else None
+                if fp:
+                    node.names[fp] = parts[2].strip()[:24]
+                    print(f"[*] {short(fp)} is now called {node.names[fp]}")
+                else:
+                    print("Usage: /name <id-or-name> <new name>   (see /peers)")
             elif line == "/peers":
-                print(", ".join(short(f) for f in node.chans) or "(none)")
+                print(", ".join(f"{node.label(f)} ({short(f)})" for f in node.chans) or "(none)")
             elif line.startswith("/send "):
                 try:
                     node.send_file(line[6:].strip().strip('"'))
