@@ -45,7 +45,34 @@ CHUNK = 256 * 1024
 PAD = 1024
 MAX_FRAME = CHUNK + 8192
 
-T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END = 1, 2, 3, 4
+T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
+
+_BAD = '<>:"/\\|?*'
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+             *(f"LPT{i}" for i in range(1, 10))}
+
+
+def safe_name(name):
+    """Windows és Linux között is biztonságos fájlnév."""
+    name = os.path.basename(name.replace("\\", "/"))
+    name = "".join("_" if (c in _BAD or ord(c) < 32) else c for c in name)
+    name = name.strip(" .")
+    if not name:
+        return "fajl"
+    stem, ext = os.path.splitext(name)
+    if stem.upper() in _RESERVED:
+        stem = "_" + stem
+    if len(stem) + len(ext) > 150:
+        stem = stem[:150 - len(ext)]
+    return stem + ext
+
+
+def file_id(path, name, size):
+    """Azonosító a folytatáshoz: név + méret + az első 1 MiB hash-e."""
+    h = hashlib.sha256(f"{name}|{size}|".encode())
+    with open(path, "rb") as f:
+        h.update(f.read(1 << 20))
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------- segédek
@@ -201,6 +228,7 @@ class Channel:
         self.aead_send, self.aead_recv = aead_send, aead_recv
         self.sn = self.rn = 0
         self.lock = threading.Lock()
+        self.offset_q = queue.Queue()
 
     def send(self, typ, payload=b""):
         body = struct.pack(">BI", typ, len(payload)) + payload
@@ -417,21 +445,25 @@ class Node:
                 if typ == T_MSG:
                     self.emit("msg", fp, data.decode("utf-8", "replace"))
                 elif typ == T_FILE_START:
+                    if fobj:
+                        fobj.close()
                     meta = json.loads(data)
-                    name = os.path.basename(str(meta["name"]).replace("\\", "/"))
-                    if name in ("", ".", ".."):
-                        name = "fajl"
-                    total = remaining = int(meta["size"])
-                    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-                    path = os.path.join(DOWNLOAD_DIR, name)
-                    base, ext = os.path.splitext(path)
-                    i = 1
-                    while os.path.exists(path):
-                        path = f"{base} ({i}){ext}"
-                        i += 1
-                    fobj = open(path, "wb")
+                    name = safe_name(str(meta["name"]))
+                    total = int(meta["size"])
+                    fid = "".join(c for c in str(meta.get("fid", "")) if c in "0123456789abcdef")[:64]
+                    part_dir = os.path.join(DOWNLOAD_DIR, ".partial")
+                    os.makedirs(part_dir, exist_ok=True)
+                    part = os.path.join(part_dir, (fid or "x" + short(fp)) + ".part")
+                    offset = 0
+                    if fid and os.path.exists(part):
+                        offset = os.path.getsize(part)
+                        if offset > total:
+                            offset = 0
+                    fobj = open(part, "ab" if offset else "wb")
+                    remaining = total - offset
                     t0, last = time.time(), 0
-                    self.emit("progress", f"RX {name}", 0, total, 0)
+                    chan.send(T_FILE_OFFSET, struct.pack(">Q", offset))
+                    self.emit("progress", f"RX {name}", offset, total, 0)
                 elif typ == T_FILE_CHUNK and fobj:
                     remaining -= len(data)
                     if remaining < 0:
@@ -446,8 +478,22 @@ class Node:
                 elif typ == T_FILE_END and fobj:
                     fobj.close()
                     fobj = None
+                    ok = remaining == 0
+                    if ok:
+                        path = os.path.join(DOWNLOAD_DIR, name)
+                        base, ext = os.path.splitext(path)
+                        i = 1
+                        while os.path.exists(path):
+                            path = f"{base} ({i}){ext}"
+                            i += 1
+                        os.replace(part, path)
+                    else:
+                        os.remove(part)
+                        path = name
                     self.emit("progress", "RX", total, total, 0)
-                    self.emit("file", fp, path, remaining == 0)
+                    self.emit("file", fp, path, ok)
+                elif typ == T_FILE_OFFSET:
+                    chan.offset_q.put(struct.unpack(">Q", data[:8])[0])
                 else:
                     raise ConnectionError("Váratlan keret")
         except Exception as e:
@@ -491,37 +537,50 @@ class Node:
                         nm = os.path.basename(path.rstrip("/\\")) or "mappa"
                         p = shutil.make_archive(os.path.join(tmp, nm), "zip", path)
                     size, name = os.path.getsize(p), os.path.basename(p)
-                    alive = dict(targets)
-                    hdr = json.dumps({"name": name, "size": size}).encode()
-                    for fp, ch in list(alive.items()):
+                    hdr = json.dumps({"name": name, "size": size,
+                                      "fid": file_id(p, name, size)}).encode()
+                    multi = len(targets) > 1
+
+                    def to_peer(fp, ch):
+                        # Minden partnernek külön szál: mindenki a saját
+                        # folytatási pontjától kapja a fájlt.
                         try:
+                            while not ch.offset_q.empty():
+                                ch.offset_q.get_nowait()
                             ch.send(T_FILE_START, hdr)
-                        except OSError:
-                            alive.pop(fp)
-                    sent, last, t0 = 0, 0, time.time()
-                    with open(p, "rb") as f:
-                        while alive:
-                            b = f.read(CHUNK)
-                            if not b:
-                                break
-                            for fp, ch in list(alive.items()):
-                                try:
+                            offset = ch.offset_q.get(timeout=120)
+                            if not 0 <= offset <= size:
+                                raise ConnectionError("Érvénytelen folytatási pont")
+                            if offset:
+                                self.emit("sys", f"{short(fp)}: folytatás innen: {human(offset)}")
+                            sent, last, t0 = offset, 0, time.time()
+                            label = f"TX {short(fp)} {name}" if multi else f"TX {name}"
+                            with open(p, "rb") as f:
+                                f.seek(offset)
+                                while True:
+                                    b = f.read(CHUNK)
+                                    if not b:
+                                        break
                                     ch.send(T_FILE_CHUNK, b)
-                                except OSError:
-                                    alive.pop(fp)
-                            sent += len(b)
-                            now = time.time()
-                            if now - last > 0.1:
-                                last = now
-                                self.emit("progress", f"TX {name}", sent, size,
-                                          sent / max(now - t0, 1e-6))
-                    for fp, ch in list(alive.items()):
-                        try:
+                                    sent += len(b)
+                                    now = time.time()
+                                    if now - last > 0.1:
+                                        last = now
+                                        self.emit("progress", label, sent, size,
+                                                  (sent - offset) / max(now - t0, 1e-6))
                             ch.send(T_FILE_END)
-                        except OSError:
-                            pass
-                    self.emit("progress", "TX", size, size, 0)
-                    self.emit("sys", f"Elküldve: {name} ({human(size)})")
+                            self.emit("progress", label, size, size, 0)
+                            self.emit("sys", f"Elküldve {short(fp)}-nek: {name} ({human(size)})")
+                        except Exception as e:
+                            self.emit("sys", f"{short(fp)}: küldés megszakadt ({e}); "
+                                             "újraküldésnél folytatódik")
+
+                    ths = [threading.Thread(target=to_peer, args=t, daemon=True)
+                           for t in targets]
+                    for t in ths:
+                        t.start()
+                    for t in ths:
+                        t.join()
                 except Exception as e:
                     self.emit("sys", f"Fájlküldési hiba: {e}")
                 finally:
@@ -808,5 +867,113 @@ def main():
     root.mainloop()
 
 
+# ---------------------------------------------------------------- CLI mód
+def cli_main(argv):
+    import argparse
+    import getpass
+
+    ap = argparse.ArgumentParser(prog="mute", description="Mute – terminál mód")
+    ap.add_argument("--cli", action="store_true", help="terminál mód (GUI nélkül)")
+    ap.add_argument("--listen", action="store_true", help="várakozás bejövő kapcsolatra")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--tor", action="store_true", help="Tor onion service / Toron át csatlakozás")
+    ap.add_argument("--connect", action="append", default=[], metavar="HOST[:PORT]",
+                    help="csatlakozás partnerhez (többször is megadható)")
+    ap.add_argument("--fp", help="elvárt partner-ujjlenyomat (a --connect-hez)")
+    ap.add_argument("--amnesia", action="store_true", help="semmit ne mentsen")
+    args = ap.parse_args(argv)
+
+    state = identity_state()
+    pw = None
+    if state == "encrypted":
+        while True:
+            pw = getpass.getpass("Identitás jelszó: ")
+            try:
+                load_identity(None, pw)
+                break
+            except ValueError:
+                print("Hibás jelszó")
+    elif state == "missing":
+        pw = getpass.getpass("Új identitás jelszava (üres = nincs): ") or None
+
+    answer = {"ev": None, "val": None}
+
+    def confirm_cb(fp):
+        answer["ev"], answer["val"] = threading.Event(), False
+        print(f"\n[?] Ismeretlen partner ujjlenyomata:\n    {fp}\n"
+              "    Hasonlítsd össze egy MÁSIK csatornán. Elfogadod? (i/n)")
+        answer["ev"].wait(180)
+        return answer["val"]
+
+    node = Node(confirm_cb, pw, args.amnesia)
+    print(BANNER)
+    print("Ujjlenyomatod:", node.my_fp)
+
+    def printer():
+        while True:
+            ev = node.events.get()
+            k = ev[0]
+            if k == "sys":
+                print(f"[*] {ev[1]}")
+            elif k == "msg":
+                print(f"{short(ev[1])}> {ev[2]}")
+            elif k == "connected":
+                print(f"[+] {short(ev[1])} biztonságosan csatlakozott")
+            elif k == "disconnected":
+                print(f"[-] {short(ev[1])} lecsatlakozott")
+            elif k == "file":
+                print(("[+] Fájl megérkezett: " if ev[3] else "[!] SÉRÜLT fájl: ") + ev[2])
+            elif k == "progress" and ev[2] == ev[3] and ev[3]:
+                pass
+    threading.Thread(target=printer, daemon=True).start()
+
+    try:
+        if args.tor:
+            lp = free_port()
+            node.start_tor(lp)
+            node.listen(lp, local_only=True)
+            print(f"Onion címed: {node.onion}:{DEFAULT_PORT}")
+        elif args.listen:
+            node.listen(args.port)
+            print("IP címeid:", ", ".join(local_ips()) or "?", f"(port {args.port})")
+        for c in args.connect:
+            host, _, prt = c.rpartition(":") if c.count(":") == 1 else (c, "", "")
+            node.connect(host or c, int(prt) if prt else DEFAULT_PORT, args.fp)
+    except Exception as e:
+        print(f"Hiba: {e}")
+        node.shutdown()
+        return
+
+    print("Parancsok: /send <fájl|mappa>  /peers  /fp  /quit   (egyéb szöveg = üzenet mindenkinek)")
+    try:
+        for line in sys.stdin:
+            line = line.rstrip("\n")
+            if answer["ev"] and not answer["ev"].is_set():
+                answer["val"] = line.strip().lower() in ("i", "igen", "y", "yes")
+                answer["ev"].set()
+            elif line in ("/quit", "/q"):
+                break
+            elif line == "/fp":
+                print(node.my_fp)
+            elif line == "/peers":
+                print(", ".join(short(f) for f in node.chans) or "(nincs)")
+            elif line.startswith("/send "):
+                try:
+                    node.send_file(line[6:].strip().strip('"'))
+                except Exception as e:
+                    print(f"[!] {e}")
+            elif line.strip():
+                try:
+                    node.send_text(line)
+                except Exception as e:
+                    print(f"[!] {e}")
+    except KeyboardInterrupt:
+        pass
+    node.shutdown()
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        cli_main(sys.argv[1:])
+    else:
+        main()

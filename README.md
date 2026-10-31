@@ -30,4 +30,20 @@ Véd: tartalom (E2E, forward secrecy), partner-hitelesítés (ujjlenyomat), üze
 lemezes nyom (nincs napló). Tor módban az IP-k és a ki-kivel-beszél is.
 Nem véd: feltört eszköz/keylogger, ujjlenyomat-egyeztetés kihagyása, a fájlok saját metaadata (EXIF, dokumentum szerző),
 időzítéses elemzés erős támadó ellen, DIRECT módban az IP/forgalom metaadat.
-Nincs fájlküldés-folytatás: megszakadt átvitelt elölről kell indítani.
+
+## Terminál (CLI) mód
+Grafikus felület nélkül (szerveren, SSH-n):
+```
+python mute.py --listen --port 5555            # várakozás
+python mute.py --connect 192.168.1.20:5555     # csatlakozás (több --connect is lehet)
+python mute.py --tor                           # onion service Toron
+python mute.py --tor --connect xyz.onion       # csatlakozás Toron át
+```
+Kapcsolók: `--fp <ujjlenyomat>` (elvárt partner), `--amnesia`.
+Parancsok: `/send <fájl|mappa>`, `/peers`, `/fp`, `/quit`; bármi más szöveg üzenetként megy mindenkinek.
+
+## Folytatható átvitel
+Ha egy fájlküldés megszakad, a fogadó a részleges adatot megtartja (`Downloads/Mute/.partial`).
+Ugyanazt a fájlt újra elküldve ott folytatódik, ahol abbamaradt (név + méret + az első 1 MiB hash-e azonosítja).
+Befejezés után a részleges fájl törlődik. A fogadott fájlnevek Windows/Linux között biztonságosra tisztítva érkeznek
+(tiltott karakterek `_`-ra, fenntartott nevek elé `_`).
