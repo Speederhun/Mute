@@ -290,6 +290,9 @@ def find_tor():
         r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
         os.path.join(home, ".local", "share", "torbrowser", "tbb", "x86_64",
                      "tor-browser", "Browser", "TorBrowser", "Tor", "tor"),
+        # macOS: Homebrew (Apple Silicon / Intel) és Tor Browser
+        "/opt/homebrew/bin/tor", "/usr/local/bin/tor",
+        "/Applications/Tor Browser.app/Contents/MacOS/Tor/tor.real",
     ]
     for c in cands:
         if c and os.path.isfile(c):
@@ -649,7 +652,8 @@ def main():
     from tkinter import filedialog, messagebox, simpledialog
 
     BG, FG, DIM, ACC, RED = "#000000", "#00ff41", "#0a7a28", "#00e5ff", "#ff3b3b"
-    FONT = ("Consolas" if os.name == "nt" else "DejaVu Sans Mono", 10)
+    FONT = (("Consolas" if os.name == "nt" else
+             "Menlo" if sys.platform == "darwin" else "DejaVu Sans Mono"), 10)
 
     root = tk.Tk()
     root.title("Mute")
@@ -731,7 +735,7 @@ def main():
 
     f3 = tk.Frame(root, bg=BG)
     f3.pack(fill="x", padx=8)
-    mk_label(f3, "PEER>", DIM).grid(row=0, column=0)
+    mk_label(f3, "PEER (ip/.onion)>", DIM).grid(row=0, column=0)
     host_var = tk.StringVar()
     mk_entry(f3, host_var, 40).grid(row=0, column=1, padx=4)
     rport_var = tk.StringVar(value=str(DEFAULT_PORT))
@@ -773,11 +777,13 @@ def main():
     mk_btn(f4, "wipe", lambda: wipe(), ACC).pack(side="left", padx=2)
     mk_btn(f4, "PANIC", lambda: panic(), RED).pack(side="left", padx=2)
 
-    def do_start():
+    def do_start(after=None):
         try:
             port = int(port_var.get())
         except ValueError:
             return messagebox.showerror("Hiba", "Érvénytelen port")
+        if node.server or node.transport == "tor":
+            return log("Már fut. A mód váltásához indítsd újra az appot.", "err")
         start_btn.config(state="disabled")
 
         def run():
@@ -789,16 +795,33 @@ def main():
                     node.emit("addr", node.onion + f":{DEFAULT_PORT}")
                 else:
                     node.listen(port)
+                if after:
+                    after()
             except Exception as e:
                 node.emit("sys", f"Hiba: {e}")
                 node.emit("enable_start")
         threading.Thread(target=run, daemon=True).start()
 
     def do_connect():
+        host = host_var.get().strip()
+        port_txt = rport_var.get().strip()
+        if host.count(":") == 1:  # "valami.onion:5555" vagy "1.2.3.4:5555" bemásolva
+            host, port_txt = host.split(":")
         try:
-            node.connect(host_var.get().strip(), int(rport_var.get()), exp_var.get().strip() or None)
+            port = int(port_txt)
         except ValueError:
-            messagebox.showerror("Hiba", "Érvénytelen port")
+            return messagebox.showerror("Hiba", "Érvénytelen port")
+        if not host:
+            return messagebox.showerror("Hiba", "Add meg a partner címét")
+        exp = exp_var.get().strip() or None
+
+        def go():
+            node.connect(host, port, exp)
+        # Tor módban a CONNECT magától elindítja a Tort, ha még nem fut
+        if mode.get() == "tor" and node.transport != "tor":
+            do_start(after=go)
+        else:
+            go()
 
     def do_send(_=None):
         t = msg_var.get().strip()

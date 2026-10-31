@@ -8,6 +8,8 @@ pip install -r requirements.txt
 python mute.py          # Linuxon: sudo apt install python3-tk
 ```
 Windows .exe: `build_windows.bat` → `dist\Mute.exe`
+macOS .app: `bash build_mac.sh` → `dist/Mute.app` (Tkinteres Python kell: python.org telepítő vagy `brew install python-tk`;
+az aláíratlan appot első indításkor jobb klikk → Megnyitás, vagy `xattr -dr com.apple.quarantine dist/Mute.app`)
 
 ## Hálózati módok
 - **DIRECT**: IP:port (LAN, port forward, vagy bármilyen VPN – Tailscale/ZeroTier/WireGuard – IP-je).
@@ -15,7 +17,15 @@ Windows .exe: `build_windows.bat` → `dist\Mute.exe`
   (minden indításnál új). Ehhez kell a `tor`:
   - Windows: Tor Expert Bundle `tor.exe` → az app mellé a `tor\` mappába (vagy Tor Browser telepítve)
   - Linux: `sudo apt install tor`
+  - macOS: `brew install tor` (vagy Tor Browser az /Applications mappában)
   Tor módban a kimenő kapcsolatok is Toron mennek (a partner sem látja az IP-det).
+
+### Csatlakozás Toron át (nem kell ugyanazon a hálózaton lenni)
+1. **A fél:** válassza a **TOR** módot → **START**. Pár másodperc után megjelenik az `xxxx.onion:5555` cím.
+   Ezt és az ujjlenyomatot adja át B-nek egy *másik* csatornán.
+2. **B fél:** válassza a **TOR** módot, írja/másolja a PEER mezőbe az onion címet → **CONNECT**
+   (a Tort a CONNECT magától elindítja). Első alkalommal hasonlítsátok össze az ujjlenyomatot.
+A cím minden indításkor új, és semmi nem mentődik, így nincs állandó azonosítód.
 
 ## Használat
 1. Indítás → jelszó az identitáskulcshoz (üres = nincs).
