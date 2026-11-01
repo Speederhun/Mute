@@ -166,6 +166,15 @@ def local_ips():
                 ips.add(a)
     except OSError:
         pass
+    try:                                    # IPv6 address that would be used to reach the internet (if any)
+        s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s6.connect(("2001:4860:4860::8888", 1))   # sends no packets
+        a6 = s6.getsockname()[0].split("%")[0]
+        s6.close()
+        if not a6.startswith(("fe80", "::1")):
+            ips.add(f"[{a6}]")
+    except OSError:
+        pass
     return sorted(ips)
 
 
@@ -863,6 +872,7 @@ class Node:
         self.psk = None           # optional pre-shared secret (32 bytes, memory only)
         self.relay = False        # hub mode: forward chat messages between your peers
         self.cover = False        # send dummy frames to hide when you are idle/active
+        self.proxy = None                # (host, port) SOCKS5 proxy for direct connections
         self.ratchet = RATCHET_SECONDS   # fresh DH key renewal interval in seconds (0 = off)
         self.shape = 0.0          # constant-rate mode: frames per second per peer (0 = off)
         self._cover_thread = None
@@ -1153,6 +1163,11 @@ class Node:
                         (host, port), timeout=90, proxy_type=socks.SOCKS5,
                         proxy_addr="127.0.0.1", proxy_port=self.socks_port,
                         proxy_rdns=True)
+                elif self.proxy:
+                    import socks
+                    c = socks.create_connection(
+                        (host, port), timeout=30, proxy_type=socks.SOCKS5,
+                        proxy_addr=self.proxy[0], proxy_port=self.proxy[1], proxy_rdns=True)
                 else:
                     c = socket.create_connection((host, port), timeout=10)
             except Exception as e:
@@ -1536,13 +1551,22 @@ def clean_host(host):
         if host.startswith(prefix):
             host = host[len(prefix):]
     host = host.strip("/ ")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]                    # [2001:db8::1] -> 2001:db8::1
     if re.fullmatch(r"[a-z2-7]{56}", host):
         host += ".onion"
     return host
 
 
 def split_hostport(text, default=DEFAULT_PORT):
+    """'host', 'host:port', '[ipv6]', '[ipv6]:port' or a bare IPv6 address -> (host, port)."""
     text = text.strip()
+    m6 = re.fullmatch(r"\[([^\]]+)\](?::(\d+))?", text)
+    if m6:
+        port = int(m6.group(2)) if m6.group(2) else default
+        if not 0 < port < 65536:
+            raise ValueError("Invalid port")
+        return m6.group(1), port
     if text.count(":") == 1:
         host, _, prt = text.partition(":")
         try:
@@ -1571,7 +1595,7 @@ def build_parser():
     g.add_argument("--bridge-file", metavar="PATH", help="file with Tor bridge lines")
     g.add_argument("--get-bridges", action="store_true",
                    help="download bridges from the Tor Project (asks you to solve a captcha); with --proxy if the site is blocked")
-    g.add_argument("--proxy", metavar="HOST:PORT", help="SOCKS5 proxy: used for --get-bridges (and see the network section)")
+    g.add_argument("--proxy", metavar="HOST:PORT", help="SOCKS5 proxy for direct connections (hides your IP from the peer behind the proxy) and for --get-bridges")
     g.add_argument("--client-auth", action="store_true",
                    help="create an onion client key (memory only) and print its public part")
     g.add_argument("--allow-client", action="append", default=[], metavar="KEY",
@@ -1614,6 +1638,7 @@ def apply_opts(node, args, secret=None):
     if args.cover:
         node.set_cover(True)
     node.ratchet = max(0, args.ratchet)
+    node.proxy = parse_proxy(args.proxy)
     if args.shape and args.shape > 0:
         node.set_shape(args.shape)
 
@@ -2178,7 +2203,8 @@ def main(args=None):
         tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left", text=(
             "Asks bridges.torproject.org for bridges. If that site is blocked where you are,\n"
             "enter a SOCKS5 proxy that can reach it (a VPN's proxy, another Tor, ...).")).pack(padx=8, pady=6)
-        px_var, sol_var, st_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="")
+        px_var, sol_var, st_var = (tk.StringVar(value=f"{node.proxy[0]}:{node.proxy[1]}" if node.proxy else ""),
+                                   tk.StringVar(), tk.StringVar(value=""))
         f = tk.Frame(win, bg=BG)
         f.pack(padx=8, fill="x")
         tk.Label(f, text="SOCKS5 proxy (optional)", bg=BG, fg=DIM, font=FONT).pack(side="left")
@@ -2393,6 +2419,22 @@ def main(args=None):
                   relief="flat", highlightthickness=1, highlightbackground=DIM)
         row(tk.Label(win, text="constant-rate traffic (hides when you talk)", bg=BG, fg=DIM, font=FONT), om)
         tk.Label(win, textvariable=est_var, bg=BG, fg=ACC, font=FONT, anchor="w").grid(
+            row=r, column=0, columnspan=3, sticky="w", padx=8)
+        r += 1
+        px_var = tk.StringVar(value=f"{node.proxy[0]}:{node.proxy[1]}" if node.proxy else "")
+        px_note = tk.StringVar(value="")
+
+        def apply_proxy(*_):
+            try:
+                node.proxy = parse_proxy(px_var.get())
+                px_note.set("direct connections go through this proxy" if node.proxy else "")
+            except ValueError:
+                px_note.set("invalid proxy - not used")
+                node.proxy = None
+        px_var.trace_add("write", apply_proxy)
+        row(tk.Label(win, text="SOCKS5 proxy for direct connections (host:port)", bg=BG, fg=DIM, font=FONT),
+            mk_entry(win, px_var, 22))
+        tk.Label(win, textvariable=px_note, bg=BG, fg=ACC, font=FONT, anchor="w").grid(
             row=r, column=0, columnspan=3, sticky="w", padx=8)
         r += 1
         row(mk_btn(win, "my onion client key...", show_client_key, DIM),

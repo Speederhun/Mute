@@ -4,8 +4,6 @@ import base64
 import http.server
 import json
 import os
-import socket
-import struct
 import sys
 import threading
 
@@ -91,56 +89,10 @@ except m.MoatError as e:
 m.MOAT_BASE = f"http://127.0.0.1:{srv.server_address[1]}/moat"
 
 
-# --- through a SOCKS5 proxy (tiny test proxy, no auth, domain or IP targets)
-hits = []
-
-
-def socks_server():
-    ls = socket.socket()
-    ls.bind(("127.0.0.1", 0)); ls.listen(5)
-
-    def pipe(a, b):
-        try:
-            while True:
-                d = a.recv(65536)
-                if not d:
-                    break
-                b.sendall(d)
-        except OSError:
-            pass
-        for x in (a, b):
-            try:
-                x.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-
-    def serve():
-        while True:
-            c, _ = ls.accept()
-
-            def one(c=c):
-                try:
-                    c.recv(262)                      # greeting
-                    c.sendall(b"\x05\x00")
-                    req = c.recv(262)
-                    atyp = req[3]
-                    if atyp == 1:
-                        host = socket.inet_ntoa(req[4:8]); prt = struct.unpack(">H", req[8:10])[0]
-                    else:
-                        ln = req[4]; host = req[5:5 + ln].decode(); prt = struct.unpack(">H", req[5 + ln:7 + ln])[0]
-                    hits.append((host, prt))
-                    up = socket.create_connection((host, prt), timeout=5)
-                    c.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-                    threading.Thread(target=pipe, args=(c, up), daemon=True).start()
-                    pipe(up, c)
-                except Exception:
-                    c.close()
-            threading.Thread(target=one, daemon=True).start()
-    threading.Thread(target=serve, daemon=True).start()
-    return ls.getsockname()
-
-
-px = socket_addr = socks_server()
+# --- through a SOCKS5 proxy (tiny test proxy)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import socks_helper
+px, hits = socks_helper.start()
 img, ch = m.moat_captcha(proxy=px)
 ok(img == JPEG and hits and hits[-1][1] == srv.server_address[1], "bridge download works through a SOCKS5 proxy")
 ok(m.parse_proxy("127.0.0.1:9050") == ("127.0.0.1", 9050) and m.parse_proxy("socks5h://localhost:1080") == ("localhost", 1080)

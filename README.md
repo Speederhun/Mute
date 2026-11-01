@@ -130,6 +130,7 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--psk` | both sides enter the same secret before connecting |
 | `--relay` | forward chat messages between your peers (hub) |
 | `--cover` | send dummy traffic at random intervals |
+| `--proxy HOST:PORT` | send direct connections through a SOCKS5 proxy (your IP stays hidden from the peer; never falls back to a direct connection); also used for `--get-bridges` |
 | `--ratchet SECONDS` | renew the session keys with a fresh Diffie-Hellman exchange about every `SECONDS` (default 600, `0` = off) |
 | `--shape RATE` | constant-rate traffic, `RATE` frames per second (e.g. `0.2` low, `1` normal, `4` high); also `/shape` inside the chat |
 | `--client-auth` | create an onion client key (memory only) and print the public part |
@@ -143,6 +144,13 @@ Commands inside: `/send <file|folder>`, `/connect <host[:port]> [fp]`, `/peers`,
 
 In the GUI the same settings are under **Options...** (closed mode, allowlist, shared secret, relay, cover traffic, onion client keys,
 auto-clear, auto-lock, clipboard, notifications, screenshot block on Windows).
+
+## SOCKS5 proxy and IPv6
+
+**Proxy:** with `--proxy HOST:PORT` (or Options > SOCKS5 proxy) direct connections leave through that proxy, so the peer sees the proxy's address, not yours. If the proxy is down
+Mute reports an error and does **not** connect directly. In Tor mode the proxy is not used (Tor has its own path). Note that a proxy operator sees who you connect to.
+**IPv6:** the listener accepts IPv4 and IPv6 at the same time; connect with `[2001:db8::5]:5555` or a bare IPv6 address, and your global IPv6 address is shown next to your IPv4 ones.
+IPv6 and the proxy are covered by the automated tests, but IPv6 over a real network has not been tried by the author.
 
 ## Getting Tor bridges automatically
 

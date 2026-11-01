@@ -460,4 +460,51 @@ ok(wait(lambda: not os.path.isdir(os.path.join(shutil_dl, ".partial")) or not os
 ok(wait(lambda: not Q1.send_queue, 5), "queue empty after cancels")
 Q1.shutdown(); Q2.shutdown()
 
+# ---- SOCKS5 proxy for direct connections, IPv6
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import socks_helper
+px, hits = socks_helper.start()
+P1, P2 = mk("p1"), mk("p2")
+pport = m.free_port()
+P1.listen(pport)
+P2.proxy = px
+P2.connect("127.0.0.1", pport)
+ok(wait(lambda: P1.chans and P2.chans, 10), "direct connection works through a SOCKS5 proxy")
+ok(hits and hits[-1] == ("127.0.0.1", pport), f"the proxy really carried the connection ({hits[-1:]})")
+P2.send_text("via proxy")
+ok(wait(lambda: any(e[2] == "via proxy" for e in events(P1, "msg"))), "chat works through the proxy")
+P1.shutdown(); P2.shutdown()
+P3 = mk("p3"); P3.proxy = ("127.0.0.1", m.free_port())     # dead proxy: must fail, never connect directly
+P4 = mk("p4"); p4port = m.free_port(); P4.listen(p4port)
+P3.connect("127.0.0.1", p4port)
+ok(wait(lambda: any("Could not connect" in e[1] for e in events(P3, "sys")), 15) and not P3.chans and not P4.chans,
+   "a dead proxy never falls back to a direct connection")
+P3.shutdown(); P4.shutdown()
+
+ok(m.split_hostport("[::1]:6000") == ("::1", 6000) and m.split_hostport("[2001:db8::5]", 5555) == ("2001:db8::5", 5555)
+   and m.split_hostport("2001:db8::5", 5555) == ("2001:db8::5", 5555) and m.split_hostport("a.b:7") == ("a.b", 7),
+   "IPv6 addresses are parsed (bracketed, bare, with port)")
+ok(m.clean_host(" [::1] ") == "::1", "brackets are removed before connecting")
+try:
+    m.split_hostport("[::1]:99999")
+    ok(False, "bad port")
+except ValueError:
+    ok(True, "out of range port is rejected")
+import socket as _s
+try:
+    t6 = _s.socket(_s.AF_INET6); t6.bind(("::1", 0)); t6.close(); have6 = True
+except OSError:
+    have6 = False
+if have6:
+    V1, V2 = mk("v1"), mk("v2")
+    v6port = m.free_port()
+    V1.listen(v6port)
+    V2.connect("::1", v6port)
+    ok(wait(lambda: V1.chans and V2.chans, 10), "connection over IPv6 (::1) works")
+    V3 = mk("v3"); V3.connect("127.0.0.1", v6port)
+    ok(wait(lambda: len(V1.chans) == 2, 10), "listener is dual-stack (IPv4 and IPv6 peers at the same time)")
+    V1.shutdown(); V2.shutdown(); V3.shutdown()
+else:
+    print("SKIP IPv6 loopback (no IPv6 on this machine)")
+
 print("all loopback tests passed")
