@@ -46,6 +46,18 @@ Every release contains the binaries for that system, an installer pack (installs
 They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`), or manually:
 **Actions > build > Run workflow**, enter a version such as `v1.1.0`.
 
+### Verify your download
+
+Release files carry a **build provenance attestation**: a signed statement from GitHub (Sigstore) that this exact file was built from this
+repository by its public workflow. With the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify Mute.exe --repo Speederhun/Mute     # or the Linux/macOS file you downloaded
+```
+It prints `Verification succeeded` only if the file is unmodified and really came from this repository's build. You can also compare the SHA-256
+in `SHA256SUMS-*.txt`. The executables are **not code-signed** with a vendor certificate, so Windows SmartScreen or macOS Gatekeeper may still
+warn - the attestation is how you check them instead.
+
 ## Install (automatic)
 
 The installers set everything up for you: **Python, Tkinter, Tor and all Python dependencies**. You do not have to download

@@ -57,6 +57,10 @@ jobs:
   windows:
     needs: test
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write       # lets GitHub sign where the build came from
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -73,6 +77,14 @@ jobs:
       - name: Installer pack (no git needed - installs Python and Tor if missing)
         shell: bash
         run: git archive --format=zip --prefix=Mute/ -o dist/Mute-windows-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md windows
+      - name: Attest build provenance (release runs only)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/Mute.exe
+            dist/Mute-cli.exe
+            dist/Mute-windows-installer.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-windows
@@ -84,6 +96,10 @@ jobs:
   linux:
     needs: test
     runs-on: ubuntu-22.04   # older glibc -> runs on more distributions
+    permissions:
+      contents: read
+      id-token: write       # lets GitHub sign where the build came from
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -101,6 +117,13 @@ jobs:
           tar -C dist -czf dist/Mute-linux.tar.gz Mute
       - name: Installer pack (installs only missing packages, never upgrades the system)
         run: git archive --format=tar.gz --prefix=Mute/ -o dist/Mute-linux-installer.tar.gz HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md linux
+      - name: Attest build provenance (release runs only)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/Mute-linux.tar.gz
+            dist/Mute-linux-installer.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-linux
@@ -111,6 +134,10 @@ jobs:
   macos:
     needs: test
     runs-on: macos-latest
+    permissions:
+      contents: read
+      id-token: write       # lets GitHub sign where the build came from
+      attestations: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -126,6 +153,13 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent dist/Mute.app dist/Mute-macos.zip
       - name: Installer pack (Homebrew based)
         run: git archive --format=zip --prefix=Mute/ -o dist/Mute-macos-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md macos
+      - name: Attest build provenance (release runs only)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/Mute-macos.zip
+            dist/Mute-macos-installer.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-macos
@@ -155,7 +189,7 @@ jobs:
           body: |
             **Windows build.** `Mute.exe` (GUI) and `Mute-cli.exe` need no Python.
             `Mute-windows-installer.zip`: unzip and double-click `windows\install.bat` - it installs Python and Tor if missing and adds a desktop shortcut.
-            The executables are unsigned, so Windows SmartScreen may warn; compare the SHA-256 in `SHA256SUMS-windows.txt`.
+            The executables are not code-signed, so Windows SmartScreen may warn. Verify: `gh attestation verify Mute.exe --repo Speederhun/Mute` (proves it was built by this repository's workflow), and compare the SHA-256 in `SHA256SUMS-windows.txt`.
             Not audited, see SECURITY.md.
           files: artifacts/*
 
@@ -182,7 +216,7 @@ jobs:
             **Linux build** (built on Ubuntu 22.04, runs on most distributions with a similar or newer glibc).
             `Mute-linux.tar.gz`: single binary (needs Tkinter for the GUI; `tor` for Tor mode).
             `Mute-linux-installer.tar.gz`: extract and run `bash linux/install.sh` - installs only missing packages (Arch, Debian/Ubuntu/Kali, Fedora, openSUSE), never upgrades the system.
-            Compare the SHA-256 in `SHA256SUMS-linux.txt`. Not audited, see SECURITY.md.
+            Verify: `gh attestation verify Mute-linux.tar.gz --repo Speederhun/Mute` (proves it was built by this repository's workflow), and compare the SHA-256 in `SHA256SUMS-linux.txt`. Not audited, see SECURITY.md.
           files: artifacts/*
 
   release-macos:
@@ -207,5 +241,5 @@ jobs:
           body: |
             **macOS build.** `Mute-macos.zip` contains the unsigned `Mute.app` (first start: right-click > Open, or `xattr -dr com.apple.quarantine Mute.app`).
             `Mute-macos-installer.zip`: unzip and run `bash macos/install.sh` - uses Homebrew for Python and Tor.
-            Compare the SHA-256 in `SHA256SUMS-macos.txt`. Not audited, see SECURITY.md.
+            Verify: `gh attestation verify Mute-macos.zip --repo Speederhun/Mute` (proves it was built by this repository's workflow), and compare the SHA-256 in `SHA256SUMS-macos.txt`. Not audited, see SECURITY.md.
           files: artifacts/*
