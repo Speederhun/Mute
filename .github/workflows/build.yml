@@ -146,7 +146,7 @@ jobs:
           path: artifacts
       - name: Checksums
         run: cd artifacts && sha256sum * > SHA256SUMS-windows.txt && cat SHA256SUMS-windows.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: windows-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
@@ -172,7 +172,7 @@ jobs:
           path: artifacts
       - name: Checksums
         run: cd artifacts && sha256sum * > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: linux-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
@@ -198,7 +198,7 @@ jobs:
           path: artifacts
       - name: Checksums
         run: cd artifacts && sha256sum * > SHA256SUMS-macos.txt && cat SHA256SUMS-macos.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: macos-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
