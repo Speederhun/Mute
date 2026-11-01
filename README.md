@@ -43,7 +43,7 @@ Pick your platform - each folder has its own guide and build script:
 
 | Platform | Guide | Build script |
 |----------|-------|--------------|
-| Windows | [windows/README.md](windows/README.md) | `windows/build.bat` |
+| Windows | [windows/README.md](windows/README.md) - double-click `windows/install.bat` (installs Python if needed) | `windows/build.bat` |
 | Linux | [linux/README.md](linux/README.md) - [Arch](linux/arch.md), [Kali](linux/kali.md) | `linux/build.sh` |
 | macOS | [macos/README.md](macos/README.md) | `macos/build.sh` |
 

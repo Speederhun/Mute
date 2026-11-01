@@ -4,6 +4,13 @@ Tested status: the shared core is tested on Linux. The Windows packaging and the
 instructions have **not** been tested on a real Windows machine yet - please open an issue
 if something does not work.
 
+## Easiest: one double-click installer
+
+Download the repository (green **Code** button > *Download ZIP*, unzip it) and double-click **`windows\install.bat`**.
+It looks for Python 3.10+, **installs Python 3.12 for your user account if it is missing** (via `winget`, otherwise
+from python.org), creates a private environment, installs the pinned dependencies and puts a **Mute** shortcut on your desktop.
+No administrator rights needed. This installer has not been tested on a real Windows machine yet.
+
 ## Option A - run from source (recommended, avoids antivirus false positives)
 
 1. Install Python 3.10+ from [python.org](https://www.python.org/downloads/windows/)
