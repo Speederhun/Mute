@@ -524,8 +524,22 @@ def _tor_search_dirs(tor_cmd=None):
     return dirs
 
 
+def _saved_tor_path():
+    """tor_path.txt next to the app (written by windows/install.bat) holds the full path to tor.exe."""
+    base = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
+    try:
+        with open(os.path.join(base, "tor_path.txt"), encoding="utf-8-sig") as f:
+            p = f.readline().strip().strip('"')
+        return p if p and os.path.isfile(p) else None
+    except OSError:
+        return None
+
+
 def find_tor():
     names = ["tor.exe", "tor"] if os.name == "nt" else ["tor"]
+    saved = _saved_tor_path()
+    if saved:
+        return saved
     cands = []
     for n in names:
         for d in _tor_search_dirs():
@@ -537,6 +551,17 @@ def find_tor():
     cands += [
         os.path.join(home, "Desktop", "Tor Browser", "Browser", "TorBrowser", "Tor", "tor.exe"),
         r"C:\Program Files\Tor Browser\Browser\TorBrowser\Tor\tor.exe",
+    ]
+    if os.name == "nt":
+        tb = os.path.join("Tor Browser", "Browser", "TorBrowser", "Tor", "tor.exe")
+        od = os.environ.get("OneDrive", "")
+        for root in (os.path.join(od, "Desktop") if od else "",
+                     os.environ.get("LOCALAPPDATA", ""), os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+                     os.environ.get("APPDATA", ""), os.environ.get("ProgramFiles", ""),
+                     os.environ.get("ProgramFiles(x86)", "")):
+            if root:
+                cands.append(os.path.join(root, tb))
+    cands += [
         os.path.join(home, ".local", "share", "torbrowser", "tbb", "x86_64",
                      "tor-browser", "Browser", "TorBrowser", "Tor", "tor"),
         # macOS: Homebrew (Apple Silicon / Intel) and Tor Browser

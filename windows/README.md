@@ -9,6 +9,9 @@ if something does not work.
 Download the repository (green **Code** button > *Download ZIP*, unzip it) and double-click **`windows\install.bat`**.
 It looks for Python 3.10+, **installs Python 3.12 for your user account if it is missing** (via `winget`, otherwise
 from python.org), creates a private environment, installs the pinned dependencies and puts a **Mute** shortcut on your desktop.
+It also **sets up Tor**: if no `tor.exe` is found it installs Tor Browser through `winget` (the installer is hash-checked
+by the Windows package repository) and Mute uses the `tor.exe` inside it (path saved in `tor_path.txt`). If `winget` is not
+available, install Tor Browser yourself from <https://www.torproject.org/download/> and run the installer again.
 No administrator rights needed. This installer has not been tested on a real Windows machine yet.
 
 ## Option A - run from source (recommended, avoids antivirus false positives)

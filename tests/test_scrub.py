@@ -103,3 +103,23 @@ ok('ClientTransportPlugin obfs4,meek_lite exec "C:/Program Files/Tor/lyrebird.ex
 ok(t.count("\nBridge ") == len(b) and "CookieAuthentication 1" in t and "__OwningControllerProcess" in t, "bridges repeated, cookie auth on, owner pid set")
 
 print("all scrub/bridge tests passed")
+
+
+# ---- tor_path.txt override (written by windows/install.bat)
+import tempfile as _tf
+_fake = os.path.join(_tf.mkdtemp(), "tor-fake.exe")
+open(_fake, "w").close()
+_txt = os.path.join(os.path.dirname(os.path.abspath(m.__file__)), "tor_path.txt")
+_had = os.path.exists(_txt)
+if not _had:
+    with open(_txt, "w", encoding="utf-8") as _f:
+        _f.write(_fake + "\n")
+    try:
+        assert m.find_tor() == _fake
+        print("PASS tor_path.txt is used by find_tor")
+        with open(_txt, "w", encoding="utf-8") as _f:
+            _f.write(os.path.join(os.path.dirname(_fake), "missing.exe"))
+        assert m.find_tor() != os.path.join(os.path.dirname(_fake), "missing.exe")
+        print("PASS a stale tor_path.txt is ignored")
+    finally:
+        os.remove(_txt)

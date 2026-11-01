@@ -5,7 +5,7 @@ setlocal
 cd /d "%~dp0.."
 set "PYEXE="
 
-echo [1/4] Looking for Python 3.10 or newer...
+echo [1/5] Looking for Python 3.10 or newer...
 call :findpython
 if defined PYEXE goto :havepython
 
@@ -36,22 +36,40 @@ exit /b 1
 :havepython
 echo      Using: %PYEXE%
 
-echo [2/4] Creating a private environment in .venv ...
+echo [2/5] Creating a private environment in .venv ...
 "%PYEXE%" -m venv .venv || goto :error
 
-echo [3/4] Installing dependencies...
+echo [3/5] Installing dependencies...
 ".venv\Scripts\python.exe" -m pip install --require-hashes -r requirements.lock
 if errorlevel 1 (
     echo      Hash-checked install failed, trying the normal install...
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt || goto :error
 )
 
-echo [4/4] Creating the desktop shortcut...
+echo [4/5] Creating the desktop shortcut...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0shortcut.ps1" -Root "%CD%"
 
+echo [5/5] Looking for Tor (needed for TOR mode)...
+call :findtor
+if defined TOREXE goto :havetor
+where winget >nul 2>nul
+if %errorlevel%==0 (
+    echo      Tor not found - installing Tor Browser via winget - Mute uses its tor.exe ...
+    winget install --id TorProject.TorBrowser -e --silent --accept-package-agreements --accept-source-agreements
+    call :findtor
+)
+if defined TOREXE goto :havetor
+echo      Could not set up Tor automatically. DIRECT mode works without it.
+echo      For TOR mode install Tor Browser from https://www.torproject.org/download/ and run this file again.
+goto :finish
+
+:havetor
+echo      Using Tor: %TOREXE%
+> "%CD%\tor_path.txt" echo %TOREXE%
+
+:finish
 echo.
 echo Done. Start Mute from the "Mute" icon on your desktop.
-echo For Tor mode see windows\README.md (put the "tor" folder next to mute.py).
 pause
 exit /b 0
 
@@ -77,4 +95,10 @@ if %errorlevel%==0 (
 )
 if defined PYEXE exit /b 0
 for /f "delims=" %%I in ('python -c "import sys,tkinter; assert sys.version_info>=(3,10); print(sys.executable)" 2^>nul') do set "PYEXE=%%I"
+exit /b 0
+
+rem ---- sets TOREXE to a tor.exe found on this computer (empty if none)
+:findtor
+set "TOREXE="
+for /f "delims=" %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0find-tor.ps1"') do set "TOREXE=%%I"
 exit /b 0
