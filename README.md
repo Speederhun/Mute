@@ -144,6 +144,14 @@ Commands inside: `/send <file|folder>`, `/connect <host[:port]> [fp]`, `/peers`,
 In the GUI the same settings are under **Options...** (closed mode, allowlist, shared secret, relay, cover traffic, onion client keys,
 auto-clear, auto-lock, clipboard, notifications, screenshot block on Windows).
 
+## Getting Tor bridges automatically
+
+In **Tor bridges... > get from Tor Project...** (or `mute --cli --tor --get-bridges`) Mute asks the Tor Project's bridge service (Moat) for bridges: either the
+built-in ones without captcha (obfs4, snowflake, meek) or fresh obfs4 bridges after you solve a captcha. Where `bridges.torproject.org` itself is blocked, enter a
+SOCKS5 proxy that can reach it (a VPN's proxy, another Tor; `--proxy HOST:PORT`). Bridges stay in memory like manually pasted ones. This talks to the real service
+over a normal HTTPS connection (not domain-fronted), so a censor that blocks that site *and* watches for it will see the request - then get bridges by email/web
+as before. Not yet verified against the live service by the author; the protocol is tested against a mock server.
+
 ## Themes
 
 Options > appearance switches the colours of the whole GUI instantly: **hacker** (default green), **amber** (old terminal), **ice**, **miami** (Miami-Vice

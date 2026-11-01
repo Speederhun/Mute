@@ -1569,6 +1569,9 @@ def build_parser():
     g.add_argument("--bridge", action="append", default=[], metavar="LINE",
                    help="Tor bridge line, e.g. 'obfs4 1.2.3.4:443 FPR cert=... iat-mode=0' (repeatable)")
     g.add_argument("--bridge-file", metavar="PATH", help="file with Tor bridge lines")
+    g.add_argument("--get-bridges", action="store_true",
+                   help="download bridges from the Tor Project (asks you to solve a captcha); with --proxy if the site is blocked")
+    g.add_argument("--proxy", metavar="HOST:PORT", help="SOCKS5 proxy: used for --get-bridges (and see the network section)")
     g.add_argument("--client-auth", action="store_true",
                    help="create an onion client key (memory only) and print its public part")
     g.add_argument("--allow-client", action="append", default=[], metavar="KEY",
@@ -1613,6 +1616,122 @@ def apply_opts(node, args, secret=None):
     node.ratchet = max(0, args.ratchet)
     if args.shape and args.shape > 0:
         node.set_shape(args.shape)
+
+
+# ---------------------------------------------------------------- Moat: fetch Tor bridges
+MOAT_BASE = "https://bridges.torproject.org/moat"
+MOAT_TYPE = "application/vnd.api+json"
+
+
+class MoatError(Exception):
+    pass
+
+
+def _moat_post(path, body=None, proxy=None, timeout=30, method="POST"):
+    """Talks to the Tor Project's bridge distribution service (Moat). `proxy` = (host, port) of a SOCKS5
+    proxy (for example a Tor you already run, or a VPN's proxy) - needed where bridges.torproject.org is blocked."""
+    import http.client
+    import ssl
+    from urllib.parse import urlsplit
+    u = urlsplit(MOAT_BASE + "/" + path)
+    port = u.port or (443 if u.scheme == "https" else 80)
+    try:
+        if proxy:
+            import socks
+            raw = socks.socksocket()
+            raw.set_proxy(socks.SOCKS5, proxy[0], int(proxy[1]), rdns=True)
+            raw.settimeout(timeout)
+            raw.connect((u.hostname, port))
+        else:
+            raw = socket.create_connection((u.hostname, port), timeout=timeout)
+        if u.scheme == "https":
+            raw = ssl.create_default_context().wrap_socket(raw, server_hostname=u.hostname)
+        conn = http.client.HTTPConnection(u.hostname, port, timeout=timeout)
+        conn.sock = raw
+        data = json.dumps(body).encode() if body is not None else None
+        conn.request(method, u.path, body=data, headers={"Content-Type": MOAT_TYPE, "Accept": MOAT_TYPE})
+        resp = conn.getresponse()
+        raw_body = resp.read(1 << 20)
+        conn.close()
+    except Exception as e:
+        raise MoatError(f"Could not reach the bridge service: {e}") from e
+    try:
+        doc = json.loads(raw_body.decode("utf-8", "replace") or "{}")
+    except ValueError as e:
+        raise MoatError(f"Unexpected answer from the bridge service (HTTP {resp.status})") from e
+    if isinstance(doc, dict) and doc.get("errors"):
+        errs = doc["errors"]
+        if any(isinstance(x, dict) and x.get("code") == 419 for x in errs):
+            raise MoatError("Wrong captcha answer - try again")
+        raise MoatError("; ".join(str(x.get("detail", x)) if isinstance(x, dict) else str(x) for x in errs))
+    if resp.status != 200:
+        raise MoatError(f"The bridge service answered HTTP {resp.status}")
+    return doc
+
+
+def moat_captcha(transport="obfs4", proxy=None):
+    """Asks for a captcha. Returns (jpeg bytes, challenge token)."""
+    doc = _moat_post("fetch", {"data": [{"version": "0.1.0", "type": "client-transports",
+                                         "supported": [transport]}]}, proxy)
+    try:
+        d = doc["data"][0]
+        if d["type"] != "moat-challenge" or d.get("transport") != transport:
+            raise KeyError("type")
+        return base64.b64decode(d["image"], validate=False), str(d["challenge"])
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise MoatError("Unexpected captcha answer from the bridge service") from e
+
+
+def moat_solve(challenge, solution, transport="obfs4", proxy=None):
+    """Sends the captcha answer. Returns bridge lines, already checked by parse_bridges()."""
+    doc = _moat_post("check", {"data": [{"id": "2", "type": "moat-solution", "version": "0.1.0",
+                                         "transport": transport, "challenge": challenge,
+                                         "solution": solution.strip(), "qrcode": "false"}]}, proxy)
+    try:
+        d = doc["data"][0]
+        if d["type"] != "moat-bridges":
+            raise KeyError("type")
+        lines = [str(b) for b in d["bridges"]]
+    except (KeyError, IndexError, TypeError) as e:
+        raise MoatError("Unexpected bridge answer from the bridge service") from e
+    return _checked_bridges(lines)
+
+
+def moat_builtin(proxy=None):
+    """Bridges that need no captcha (the same built-in ones Tor Browser offers): obfs4, snowflake, meek."""
+    doc = _moat_post("circumvention/builtin", None, proxy)
+    lines = []
+    items = doc.items() if isinstance(doc, dict) else []
+    for _, v in items:
+        if isinstance(v, list):
+            lines += [x for x in v if isinstance(x, str)]
+    if not lines:
+        raise MoatError("The bridge service returned no built-in bridges")
+    return _checked_bridges(lines)
+
+
+def _checked_bridges(lines):
+    good = []
+    for ln in lines:
+        if len(ln) > 600 or not ln.isprintable() or "\n" in ln or "\r" in ln:
+            continue                      # never let odd characters from the network near torrc
+        try:
+            good += [b[0] for b in parse_bridges(ln)]
+        except ValueError:
+            continue                      # a type Mute cannot use (or a malformed line) is skipped
+    if not good:
+        raise MoatError("The service sent no bridges that Mute can use")
+    return good
+
+
+def parse_proxy(text):
+    """'host:port' -> (host, port); empty -> None."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    text = re.sub(r"^socks5h?://", "", text)
+    host, port = split_hostport(text, 9050)
+    return host, port
 
 
 # ---------------------------------------------------------------- GUI themes
@@ -2029,7 +2148,7 @@ def main(args=None):
             log(f"Screenshot protection failed: {e}", "err")
 
     # --- dialogs
-    def text_dialog(title, intro, initial, on_save):
+    def text_dialog(title, intro, initial, on_save, extra=None):
         win = tk.Toplevel(root)
         win.title(title)
         win.configure(bg=BG)
@@ -2045,7 +2164,124 @@ def main(args=None):
             except ValueError as e:
                 return messagebox.showerror(title, str(e), parent=win)
             win.destroy()
-        mk_btn(win, "save", save).pack(pady=8)
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(pady=8)
+        mk_btn(bar, "save", save).pack(side="left", padx=4)
+        if extra:
+            mk_btn(bar, extra[0], lambda: extra[1](txt, win), ACC).pack(side="left", padx=4)
+
+    def moat_dialog(txt, parent):
+        """Download bridges from the Tor Project (Moat). Network work runs in a thread."""
+        win = tk.Toplevel(parent)
+        win.title("Get bridges from the Tor Project")
+        win.configure(bg=BG)
+        tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left", text=(
+            "Asks bridges.torproject.org for bridges. If that site is blocked where you are,\n"
+            "enter a SOCKS5 proxy that can reach it (a VPN's proxy, another Tor, ...).")).pack(padx=8, pady=6)
+        px_var, sol_var, st_var = tk.StringVar(), tk.StringVar(), tk.StringVar(value="")
+        f = tk.Frame(win, bg=BG)
+        f.pack(padx=8, fill="x")
+        tk.Label(f, text="SOCKS5 proxy (optional)", bg=BG, fg=DIM, font=FONT).pack(side="left")
+        mk_entry(f, px_var, 22).pack(side="left", padx=6)
+        tk.Label(win, textvariable=st_var, bg=BG, fg=ACC, font=FONT, wraplength=520, justify="left").pack(padx=8, pady=4)
+        img_lbl = tk.Label(win, bg=BG)
+        img_lbl.pack()
+        state = {"challenge": None}
+
+        def proxy():
+            return parse_proxy(px_var.get())
+
+        def run(work, done):
+            def th():
+                try:
+                    res, err = work(), None
+                except (MoatError, ValueError) as e:
+                    res, err = None, e
+                try:
+                    root.after(0, lambda: done(res, err))
+                except RuntimeError:
+                    pass
+            st_var.set("working...")
+            threading.Thread(target=th, daemon=True).start()
+
+        def add(lines):
+            have = {b.strip() for b in txt.get("1.0", "end").splitlines()}
+            txt.insert("end", "\n".join(x for x in lines if x not in have) + "\n")
+
+        def get_builtin():
+            try:
+                px = proxy()
+            except ValueError as e:
+                return st_var.set(str(e))
+
+            def done(res, err):
+                if err:
+                    return st_var.set(str(err))
+                add(res)
+                st_var.set(f"{len(res)} built-in bridge(s) added - press save in the bridge window")
+            run(lambda: moat_builtin(px), done)
+
+        def get_captcha():
+            try:
+                px = proxy()
+            except ValueError as e:
+                return st_var.set(str(e))
+
+            def done(res, err):
+                if err:
+                    return st_var.set(str(err))
+                data, state["challenge"] = res
+                shown = False
+                try:                                    # nicer with Pillow, otherwise the system image viewer
+                    import io
+                    from PIL import Image, ImageTk
+                    ph = ImageTk.PhotoImage(Image.open(io.BytesIO(data)))
+                    img_lbl.config(image=ph)
+                    img_lbl.image = ph
+                    shown = True
+                except Exception:
+                    pass
+                if not shown:
+                    path = os.path.join(tempfile.mkdtemp(prefix="mute_captcha_"), "captcha.jpg")
+                    with open(path, "wb") as fh:
+                        fh.write(data)
+                    try:
+                        if os.name == "nt":
+                            os.startfile(path)
+                        else:
+                            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
+                    st_var.set(f"Captcha image opened in your image viewer (file: {path}). Type what it shows.")
+                else:
+                    st_var.set("Type the characters shown, then press submit.")
+            run(lambda: moat_captcha("obfs4", px), done)
+
+        def submit():
+            if not state["challenge"]:
+                return st_var.set("Press 'get captcha' first")
+            try:
+                px = proxy()
+            except ValueError as e:
+                return st_var.set(str(e))
+
+            def done(res, err):
+                if err:
+                    return st_var.set(str(err))
+                add(res)
+                st_var.set(f"{len(res)} bridge(s) added - press save in the bridge window")
+                state["challenge"] = None
+            run(lambda: moat_solve(state["challenge"], sol_var.get(), "obfs4", px), done)
+
+        bar = tk.Frame(win, bg=BG)
+        bar.pack(pady=4)
+        mk_btn(bar, "built-in bridges (no captcha)", get_builtin).pack(side="left", padx=4)
+        mk_btn(bar, "get captcha", get_captcha, ACC).pack(side="left", padx=4)
+        f2 = tk.Frame(win, bg=BG)
+        f2.pack(pady=4)
+        mk_entry(f2, sol_var, 16).pack(side="left", padx=4)
+        mk_btn(f2, "submit", submit).pack(side="left", padx=4)
 
     def edit_bridges():
         def save(text):
@@ -2056,7 +2292,7 @@ def main(args=None):
                     "One bridge per line (get them at bridges.torproject.org).\n"
                     "Supported: obfs4, meek_lite, snowflake, plain bridges.\n"
                     "Kept in memory only; applied the next time Tor starts.",
-                    "\n".join(b[0] for b in node.bridges), save)
+                    "\n".join(b[0] for b in node.bridges), save, ("get from Tor Project...", moat_dialog))
 
     def edit_allowed_fps():
         def save(text):
@@ -2438,6 +2674,26 @@ def cli_main(args):
     if args.bridge_file:
         with open(args.bridge_file, encoding="utf-8") as f:
             bridge_text += "\n" + f.read()
+    if args.get_bridges:
+        try:
+            px = parse_proxy(args.proxy)
+            print("[*] Asking the Tor Project for bridges...")
+            data, challenge = moat_captcha("obfs4", px)
+            path = os.path.join(tempfile.mkdtemp(prefix="mute_captcha_"), "captcha.jpg")
+            with open(path, "wb") as fh:
+                fh.write(data)
+            print(f"[*] Open this captcha image and type what it shows:\n    {path}")
+            answer_txt = input("Captcha> ")
+            got = moat_solve(challenge, answer_txt, "obfs4", px)
+            print(f"[*] Got {len(got)} bridge(s)")
+            bridge_text += "\n" + "\n".join(got)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        except (MoatError, ValueError, EOFError) as e:
+            print(f"Error: {e}")
+            return
     if bridge_text.strip():
         try:
             node.set_bridges(bridge_text)
