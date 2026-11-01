@@ -13,7 +13,7 @@ sudo pacman -S --needed python tk tor git
   enable or start the `tor.service` system daemon)
 
 > **Shortcut:** `bash linux/install.sh` does steps 1-3 for you (pacman packages, venv, launcher).
-> If pacman complains about missing files or version mismatches, run `sudo pacman -Syu` first.
+> It only installs what is missing and never upgrades your system. If pacman reports missing files or conflicts, fix your mirrors/database your own way first.
 
 ## 2. Get Mute and install the Python packages in a virtual environment
 

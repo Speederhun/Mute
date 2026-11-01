@@ -6,19 +6,26 @@
 #   bash linux/install.sh                 install everything
 #   bash linux/install.sh --dry-run       only print what would be done
 #   bash linux/install.sh --no-packages   skip system packages (you already have python3, tk, tor)
+#   bash linux/install.sh --yes           answer yes to the package manager's question
+#
+# It never upgrades your system: only missing packages are installed.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
-DRY=0; NOPKG=0
+DRY=0; NOPKG=0; YES=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;;
     --no-packages) NOPKG=1 ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --yes|-y) YES=1 ;;
+    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "Unknown option: $a"; exit 2 ;;
   esac
 done
+
+YESFLAG_PACMAN=""; YESFLAG_APT=""; YESFLAG_DNF=""; YESFLAG_ZYPPER=""
+if [ "$YES" = 1 ]; then YESFLAG_PACMAN="--noconfirm"; YESFLAG_APT="-y"; YESFLAG_DNF="-y"; YESFLAG_ZYPPER="--non-interactive"; fi
 
 say() { printf '\n==> %s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then printf '+ %s\n' "$*"; else "$@"; fi; }
@@ -51,28 +58,63 @@ case " $ID_STR " in
   *" suse "*|*" opensuse "*|*" opensuse-leap "*|*" opensuse-tumbleweed "*) FAMILY=suse ;;
 esac
 
+# Only packages that are MISSING are installed. The installer never upgrades the system:
+# no "pacman -Syu", no "apt upgrade", no "dnf upgrade". The package manager shows its own
+# transaction and asks for confirmation (use --yes to answer yes automatically).
+is_installed() {
+  case " ${MUTE_ASSUME_INSTALLED:-} " in *" $1 "*) return 0 ;; esac
+  case "$FAMILY" in
+    arch) pacman -Q "$1" >/dev/null 2>&1 ;;
+    debian) dpkg -s "$1" >/dev/null 2>&1 ;;
+    fedora|suse) rpm -q "$1" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+missing() {
+  local out=() p
+  for p in "$@"; do is_installed "$p" || out+=("$p"); done
+  echo "${out[@]:-}"
+}
+
 if [ "$NOPKG" = 0 ]; then
   [ -n "$FAMILY" ] || { echo "Unknown distribution ($ID_STR). Install python3 (3.10+), tkinter and tor yourself, then run with --no-packages."; exit 1; }
-  say "[1/5] Installing system packages ($FAMILY): python, tkinter, tor"
+  say "[1/5] System packages ($FAMILY): only missing ones are installed, nothing is upgraded"
   case "$FAMILY" in
     arch)
-      if ! run $SUDO pacman -S --needed --noconfirm python tk tor; then
-        echo "pacman failed. If it says files are not found (404) or versions mismatch, update your system"
-        echo "first with: sudo pacman -Syu   (Arch does not support installing single packages on a stale database)."
-        exit 1
+      # shellcheck disable=SC2046
+      MISS="$(missing python tk tor)"
+      if [ -z "$MISS" ]; then echo "   python, tk and tor are already installed."; else
+        # shellcheck disable=SC2086
+        run $SUDO pacman -S --needed $YESFLAG_PACMAN $MISS || {
+          echo "pacman could not install: $MISS"
+          echo "Nothing was upgraded. If pacman reports missing files or version conflicts, fix your package"
+          echo "database or mirrors your own way and run this again (or install the packages yourself and use --no-packages)."
+          exit 1; }
       fi
       echo "   Bridges (obfs4/snowflake) need an extra program from the AUR, see linux/arch.md." ;;
     debian)
-      run $SUDO apt-get update
-      run $SUDO apt-get install -y python3 python3-venv python3-pip python3-tk tor
-      try $SUDO apt-get install -y lyrebird
-      try $SUDO apt-get install -y obfs4proxy
-      try $SUDO apt-get install -y snowflake-client ;;
+      MISS="$(missing python3 python3-venv python3-pip python3-tk tor)"
+      if [ -z "$MISS" ]; then echo "   python3, venv, pip, tk and tor are already installed."; else
+        # "update" only refreshes the package lists; --no-upgrade never upgrades installed packages
+        run $SUDO apt-get update
+        # shellcheck disable=SC2086
+        run $SUDO apt-get install --no-upgrade $YESFLAG_APT $MISS
+      fi
+      for opt in lyrebird obfs4proxy snowflake-client; do
+        if ! is_installed "$opt"; then
+          # shellcheck disable=SC2086
+          try $SUDO apt-get install --no-upgrade $YESFLAG_APT "$opt"
+        fi
+      done ;;
     fedora)
-      run $SUDO dnf install -y python3 python3-pip python3-tkinter tor
-      try $SUDO dnf install -y obfs4 ;;
+      MISS="$(missing python3 python3-pip python3-tkinter tor)"
+      # shellcheck disable=SC2086
+      if [ -n "$MISS" ]; then run $SUDO dnf install $YESFLAG_DNF $MISS; else echo "   already installed."; fi
+      is_installed obfs4 || try $SUDO dnf install $YESFLAG_DNF obfs4 ;;
     suse)
-      run $SUDO zypper --non-interactive install python3 python3-pip python3-tk tor ;;
+      MISS="$(missing python3 python3-pip python3-tk tor)"
+      # shellcheck disable=SC2086
+      if [ -n "$MISS" ]; then run $SUDO zypper install $YESFLAG_ZYPPER $MISS; else echo "   already installed."; fi ;;
   esac
 else
   say "[1/5] Skipping system packages (--no-packages)"

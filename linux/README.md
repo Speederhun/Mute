@@ -14,7 +14,8 @@ bash linux/install.sh
 ```
 It detects your distribution (Arch/Manjaro, Debian/Ubuntu/Kali/Mint, Fedora, openSUSE), installs Python, Tkinter and **Tor**
 with your package manager (asks for your sudo password), creates a private environment with hash-checked dependencies,
-a `mute` command in `~/.local/bin` and an application-menu entry. `--dry-run` only prints what it would do,
+a `mute` command in `~/.local/bin` and an application-menu entry. It **never upgrades your system**: only packages that are missing are installed, and the package manager shows its
+transaction and asks for confirmation (`--yes` answers for you). `--dry-run` only prints what it would do,
 `--no-packages` skips the system packages. Tested on Linux in a sandbox without installing packages
 (dry-run for every distribution, full environment/launcher setup); the package-manager steps themselves are untested.
 
