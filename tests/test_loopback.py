@@ -287,4 +287,107 @@ ok(wait(lambda: os.path.exists(os.path.join(m.DOWNLOAD_DIR, "shaped.bin")), 60),
 ok(sha(os.path.join(m.DOWNLOAD_DIR, "shaped.bin")) == sha(fpath), "file hash equal over constant-rate traffic")
 S1.shutdown(); S2.shutdown()
 
+# ---- fresh Diffie-Hellman key renewal (ratchet)
+def rpair():
+    a, b = _socket.socketpair()
+    out = {}
+    th = _th.Thread(target=lambda: out.update(r=m.handshake(b, _K.generate(), False)))
+    th.start()
+    ra = m.handshake(a, _K.generate(), True)
+    th.join()
+    return a, b, m.Channel(a, ra[1], True), m.Channel(b, out["r"][1], False)
+
+
+def pump(ch, got):
+    def run():
+        try:
+            while True:
+                got.append(ch.recv())
+        except Exception:
+            pass
+    _th.Thread(target=run, daemon=True).start()
+
+
+def keys(ch):
+    p = ch.noise.noise_protocol
+    return p.cipher_state_encrypt.k, p.cipher_state_decrypt.k
+
+
+for rate in (0, 80):
+    ca, cb = None, None
+    a, b, ca, cb = rpair()
+    if rate:
+        ca.set_rate(rate); cb.set_rate(rate)
+    ga, gb = [], []
+    pump(ca, ga); pump(cb, gb)
+    ca.send(m.T_MSG, b"before"); 
+    ok(wait(lambda: (m.T_MSG, b"before") in gb), f"message before renewal arrives (rate {rate})")
+    old_a, old_b = keys(ca), keys(cb)
+    stop = _th.Event()
+    sent = []
+
+    def spam(ch, tag):
+        i = 0
+        while not stop.is_set():
+            try:
+                ch.send(m.T_MSG, f"{tag}{i}".encode()); sent.append(f"{tag}{i}".encode()); i += 1
+            except Exception:
+                return
+            time.sleep(0.003 if not rate else 0.02)
+    _th.Thread(target=spam, args=(ca, "a"), daemon=True).start()
+    _th.Thread(target=spam, args=(cb, "b"), daemon=True).start()
+    for _ in range(3):
+        time.sleep(0.3)
+        ok(ca.ratchet_now(), f"renewal started (rate {rate})")
+        ok(wait(lambda: ca._eph is None and cb._pend_rx is None, 15), f"renewal completes while both sides chat (rate {rate})")
+    time.sleep(0.5)
+    stop.set(); time.sleep(0.5 if not rate else 1.5)
+    new_a, new_b = keys(ca), keys(cb)
+    ok(new_a[0] != old_a[0] and new_a[1] != old_a[1] and new_b[0] != old_b[0], f"all four keys are new (rate {rate})")
+    ok(new_a[0] == new_b[1] and new_a[1] == new_b[0], f"both sides agree on the new keys (rate {rate})")
+    ok(ca._ratchets == 3 and cb._ratchets == 3, f"three renewals counted (rate {rate})")
+    got = {x[1] for x in ga + gb if x[0] == m.T_MSG}
+    mine = {x for x in sent}
+    # nothing lost or garbled across the key switches (a few at the very end may still be in flight)
+    ok(len(mine - got) <= 3 and not (got - mine - {b"before"}), f"no message lost or corrupted across renewals (rate {rate}); {len(mine)} sent")
+    a.close(); b.close(); ca.dead.set(); cb.dead.set()
+
+# misuse is rejected
+a, b, ca, cb = rpair()
+pump(cb, [])
+res = []
+th = _th.Thread(target=lambda: res.append(_try(lambda: ca.recv())))
+def _try(f):
+    try:
+        f(); return False
+    except ConnectionError:
+        return True
+# responder tries to start a renewal / DONE without INIT -> initiator side must refuse
+cb2 = cb
+cb2._send_raw(m.T_RATCH_DONE, bytes(32))
+a.settimeout(5)
+ok(_try(lambda: ca.recv()), "unexpected DONE is rejected")
+a, b, ca, cb = rpair()
+cb._send_raw(m.T_RATCH_INIT, os.urandom(32))
+a.settimeout(5)
+ok(_try(lambda: ca.recv()), "responder-started renewal is rejected")
+a, b, ca, cb = rpair()
+ca._send_raw(m.T_RATCH_INIT, bytes(32))      # all-zero point: low order, must not be accepted
+b.settimeout(5)
+ok(_try(lambda: cb.recv()), "low-order public key in renewal is rejected")
+a, b, ca, cb = rpair()
+ca._send_raw(m.T_RATCH_INIT, b"short")
+b.settimeout(5)
+ok(_try(lambda: cb.recv()), "malformed renewal is rejected")
+
+# timer-driven renewal
+a, b, ca, cb = rpair()
+ga, gb = [], []
+pump(ca, ga); pump(cb, gb)
+ca.start_ratchet(0.4)
+ok(wait(lambda: ca._ratchets >= 2 and cb._ratchets >= 2, 10), "timer starts renewals by itself")
+ca.send(m.T_MSG, b"after timer")
+ok(wait(lambda: (m.T_MSG, b"after timer") in gb), "chat still works after timer renewals")
+ca.ratchet_every = 0; ca.dead.set(); cb.dead.set()
+
 print("all loopback tests passed")

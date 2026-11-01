@@ -17,7 +17,7 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 - **Two network modes**
   - **DIRECT** - plain TCP to `IP:port` (LAN, port forward, or any VPN address such as Tailscale/WireGuard).
   - **TOR** - built-in onion service: works across networks and through NAT without port forwarding, and hides both IP addresses. Optional **bridges** (obfs4, meek_lite, snowflake) hide that you use Tor.
-- **Strong, standard cryptography**: Noise_XX_25519_ChaChaPoly_SHA256 handshake, mutual authentication, forward secrecy, identities encrypted on the wire, periodic key ratchet, message padding.
+- **Strong, standard cryptography**: Noise_XX_25519_ChaChaPoly_SHA256 handshake, mutual authentication, forward secrecy, identities encrypted on the wire, symmetric key ratchet plus a fresh Diffie-Hellman key renewal every ~10 minutes, message padding.
 - **Files and folders**: large files in chunks with speed/ETA, **resumable** after an interruption, folders sent as a clean zip.
 - **Metadata scrubbing** (on by default) for outgoing files - see below.
 - **Group chat**: connect to several peers; messages and files go to everyone you are connected to (full mesh, or via a relay hub).
@@ -130,6 +130,7 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--psk` | both sides enter the same secret before connecting |
 | `--relay` | forward chat messages between your peers (hub) |
 | `--cover` | send dummy traffic at random intervals |
+| `--ratchet SECONDS` | renew the session keys with a fresh Diffie-Hellman exchange about every `SECONDS` (default 600, `0` = off) |
 | `--shape RATE` | constant-rate traffic, `RATE` frames per second (e.g. `0.2` low, `1` normal, `4` high); also `/shape` inside the chat |
 | `--client-auth` | create an onion client key (memory only) and print the public part |
 | `--allow-client KEY` | only holders of these onion client keys can reach your onion service |
@@ -196,7 +197,10 @@ In TOR mode also your IP address and who talks to whom. Closed mode and onion cl
 - the screenshot block is a Windows display-affinity flag: it stops ordinary screen capture, not a camera or a compromised OS;
 - RAM, swap and crash dumps (secrets live in memory while the app runs).
 
-The key ratchet gives forward secrecy but not full post-compromise security (no double ratchet).
+Every ~10 minutes (`--ratchet`) the side that opened the connection starts a **fresh X25519 exchange inside the encrypted channel**; both directions then
+switch to new keys derived from it. Someone who stole the current session keys *and then only listens passively* is locked out after the next renewal
+(post-compromise security against passive attackers). An attacker who keeps **actively** controlling the connection with the stolen keys can still
+follow the renewals, and a compromised device is compromised, so this is not a full double ratchet. Old keys are erased after each switch.
 Adding one would be a protocol change; use a vetted implementation rather than hand-rolling it.
 
 **Not audited.** The cryptography uses the standard Noise protocol via a library, but the surrounding code

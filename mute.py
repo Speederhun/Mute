@@ -11,7 +11,7 @@ Cryptography:
   * Noise_XX_25519_ChaChaPoly_SHA256 handshake (noiseprotocol library):
     mutual authentication, forward secrecy, identities encrypted on the wire
   * X25519 identity key (optionally passphrase-protected: scrypt + ChaCha20-Poly1305)
-  * 1 KB padding (hides message length), key ratchet (rekey) every 512 frames
+  * 1 KB padding (hides message length), key ratchet (rekey) every 512 frames + fresh DH renewal every ~10 min
   * Outgoing files can be scrubbed of metadata (EXIF/GPS, document properties,
     zip timestamps) before they leave your machine
   * No logs, messages live in memory only
@@ -35,8 +35,10 @@ import time
 import zipfile
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.serialization import (
     Encoding, NoEncryption, PrivateFormat, PublicFormat)
@@ -45,7 +47,7 @@ from noise.connection import Keypair, NoiseConnection
 APP_DIR = os.path.join(os.path.expanduser("~"), ".mute")
 DOWNLOAD_DIR = os.path.join(os.path.expanduser("~"), "Downloads", "Mute")
 DEFAULT_PORT = 5555
-MAGIC = b"Mute/3 Noise_XX"   # Noise prologue: binds both sides to this protocol version
+MAGIC = b"Mute/4 Noise_XX"   # Noise prologue: binds both sides to this protocol version
 NOISE_NAME = b"Noise_XX_25519_ChaChaPoly_SHA256"
 NOISE_NAME_PSK = b"Noise_XXpsk3_25519_ChaChaPoly_SHA256"
 KNOWN_MAGIC = b"SP2PKNW1"
@@ -57,6 +59,8 @@ MAX_FRAME = 65535 + 64
 
 T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
 T_RELAY, T_COVER, T_FRAG = 6, 7, 8
+T_RATCH_INIT, T_RATCH_ACK, T_RATCH_DONE = 9, 10, 11   # fresh Diffie-Hellman key renewal
+RATCHET_SECONDS = 600        # default: new ephemeral DH exchange about every 10 minutes (0 = off)
 
 _BAD = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -299,9 +303,15 @@ def shape_estimate(rate, tor=True):
 
 
 class Channel:
-    def __init__(self, sock, noise):
+    def __init__(self, sock, noise, initiator=False):
         self.sock = sock
         self.noise = noise
+        self.initiator = initiator      # the side that opened the connection starts key renewals
+        self._eph = None                # our pending ratchet ephemeral key (initiator)
+        self._pend_rx = None            # receive key to switch to when the peer says DONE (responder)
+        self._ratchets = 0
+        self.ratchet_every = 0.0
+        self._ratch_thread = None
         self.sn = self.rn = 0
         self.lock = threading.Lock()
         self.offset_q = queue.Queue()
@@ -314,7 +324,7 @@ class Channel:
         self._asm = {}                 # message id -> [type, bytearray]
 
     # -- raw frame
-    def _send_raw(self, typ, payload=b""):
+    def _send_raw(self, typ, payload=b"", after=None):
         body = struct.pack(">BI", typ, len(payload)) + payload
         body += b"\0" * ((-len(body)) % PAD)  # length hiding: 1 KB units
         with self.lock:
@@ -322,6 +332,8 @@ class Channel:
             self.sn += 1
             if self.sn % REKEY_EVERY == 0:
                 self.noise.rekey_outbound_cipher()  # old key is erased
+            if after:
+                after()                              # e.g. switch to the renewed send key, atomically
             self.sock.sendall(struct.pack(">I", len(ct)) + ct)
 
     # -- constant-rate mode: every frame is exactly one 1 KB unit, sent on a fixed clock;
@@ -340,10 +352,10 @@ class Channel:
             while self.rate > 0 and not self.dead.is_set():
                 nxt += 1.0 / self.rate
                 try:
-                    typ, payload = self._q.get_nowait()
+                    typ, payload, after = self._q.get_nowait()
                 except queue.Empty:
-                    typ, payload = T_COVER, b""
-                self._send_raw(typ, payload)
+                    typ, payload, after = T_COVER, b"", None
+                self._send_raw(typ, payload, after)
                 self.dead.wait(max(0.0, nxt - time.monotonic()))
         except OSError:
             self.dead.set()
@@ -351,10 +363,28 @@ class Channel:
         # rate switched off: flush what is still queued
         try:
             while True:
-                typ, payload = self._q.get_nowait()
-                self._send_raw(typ, payload)
+                typ, payload, after = self._q.get_nowait()
+                self._send_raw(typ, payload, after)
         except (queue.Empty, OSError):
             pass
+
+    def _put(self, frame):
+        while True:
+            if self.dead.is_set():
+                raise ConnectionError("Connection closed")
+            try:
+                self._q.put(frame, timeout=1)
+                return
+            except queue.Full:
+                continue
+
+    def _send_ctl(self, typ, payload, after=None):
+        """Control frame (key renewal): goes through the shaper queue when constant-rate is on, so
+        the order of frames and the moment of the key switch stay exact."""
+        if self.rate > 0 and self._q is not None:
+            self._put((typ, payload, after))
+        else:
+            self._send_raw(typ, payload, after)
 
     def send(self, typ, payload=b""):
         if self.rate <= 0:
@@ -365,15 +395,76 @@ class Channel:
         n = max(1, -(-len(payload) // FRAG_DATA))
         for k in range(n):
             part = payload[k * FRAG_DATA:(k + 1) * FRAG_DATA]
-            frame = (T_FRAG, struct.pack(FRAG_HDR, typ, 1 if k == n - 1 else 0, mid) + part)
-            while True:
-                if self.dead.is_set():
-                    raise ConnectionError("Connection closed")
-                try:
-                    self._q.put(frame, timeout=1)
-                    break
-                except queue.Full:
-                    continue
+            self._put((T_FRAG, struct.pack(FRAG_HDR, typ, 1 if k == n - 1 else 0, mid) + part, None))
+
+    # -- periodic fresh Diffie-Hellman: both directions get brand-new keys that depend on new
+    #    random ephemeral keys, so a key that leaked earlier stops working for later traffic
+    def _ratchet_keys(self, dh):
+        self._ratchets += 1
+        okm = HKDF(algorithm=hashes.SHA256(), length=64,
+                   salt=self.noise.get_handshake_hash() + struct.pack(">I", self._ratchets),
+                   info=b"Mute/4 ratchet").derive(dh)
+        return okm[:32], okm[32:]        # initiator->responder, responder->initiator
+
+    def _dh(self, priv, pub):
+        try:
+            return priv.exchange(X25519PublicKey.from_public_bytes(pub))
+        except ValueError as e:
+            raise ConnectionError("Invalid key in renewal") from e
+
+    def _set_send_key(self, k):
+        self.noise.noise_protocol.cipher_state_encrypt.initialize_key(k)
+
+    def _set_recv_key(self, k):
+        self.noise.noise_protocol.cipher_state_decrypt.initialize_key(k)
+
+    def ratchet_now(self):
+        """Initiator: start a key renewal (the peer answers, then both switch keys)."""
+        if not self.initiator or self._eph is not None or self.dead.is_set():
+            return False
+        self._eph = X25519PrivateKey.generate()
+        self._send_ctl(T_RATCH_INIT, self._eph.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw))
+        return True
+
+    def start_ratchet(self, seconds):
+        self.ratchet_every = float(seconds)
+        if self.initiator and seconds > 0 and not (self._ratch_thread and self._ratch_thread.is_alive()):
+            self._ratch_thread = threading.Thread(target=self._ratchet_loop, daemon=True)
+            self._ratch_thread.start()
+
+    def _ratchet_loop(self):
+        try:
+            while self.ratchet_every > 0:
+                if self.dead.wait(self.ratchet_every * random.uniform(0.8, 1.2)):
+                    return
+                if self.ratchet_every > 0:
+                    self.ratchet_now()
+        except (OSError, ConnectionError):
+            self.dead.set()
+
+    def _on_ratchet(self, typ, data):
+        if len(data) != 32:
+            raise ConnectionError("Invalid key renewal")
+        if typ == T_RATCH_INIT:
+            if self.initiator or self._pend_rx is not None:
+                raise ConnectionError("Unexpected key renewal")
+            eph = X25519PrivateKey.generate()
+            k_ir, k_ri = self._ratchet_keys(self._dh(eph, data))
+            self._pend_rx = k_ir
+            self._send_ctl(T_RATCH_ACK, eph.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
+                           after=lambda: self._set_send_key(k_ri))
+        elif typ == T_RATCH_ACK:
+            if not self.initiator or self._eph is None:
+                raise ConnectionError("Unexpected key renewal")
+            k_ir, k_ri = self._ratchet_keys(self._dh(self._eph, data))
+            self._eph = None
+            self._set_recv_key(k_ri)         # everything the peer sends after its ACK uses the new key
+            self._send_ctl(T_RATCH_DONE, bytes(32), after=lambda: self._set_send_key(k_ir))
+        else:                                 # T_RATCH_DONE
+            if self.initiator or self._pend_rx is None:
+                raise ConnectionError("Unexpected key renewal")
+            self._set_recv_key(self._pend_rx)
+            self._pend_rx = None
 
     def close(self):
         self.dead.set()
@@ -398,6 +489,9 @@ class Channel:
     def recv(self):
         while True:
             typ, data = self._recv_frame()
+            if typ in (T_RATCH_INIT, T_RATCH_ACK, T_RATCH_DONE):
+                self._on_ratchet(typ, data)
+                continue
             if typ != T_FRAG:
                 return typ, data
             hdr = struct.calcsize(FRAG_HDR)
@@ -767,6 +861,7 @@ class Node:
         self.psk = None           # optional pre-shared secret (32 bytes, memory only)
         self.relay = False        # hub mode: forward chat messages between your peers
         self.cover = False        # send dummy frames to hide when you are idle/active
+        self.ratchet = RATCHET_SECONDS   # fresh DH key renewal interval in seconds (0 = off)
         self.shape = 0.0          # constant-rate mode: frames per second per peer (0 = off)
         self._cover_thread = None
         self.client_auth = None   # (private b64, public b32) for onion client authorization
@@ -1099,8 +1194,9 @@ class Node:
                 if fp in self.chans:
                     raise ConnectionError("Already connected to this peer")
                 sock.settimeout(None)
-                chan = Channel(sock, noise)
+                chan = Channel(sock, noise, initiator)
                 chan.set_rate(self.shape)
+                chan.start_ratchet(self.ratchet)
                 self.chans[fp] = chan
         except Exception as e:
             self.emit("sys", f"Connection failed: {e}")
@@ -1379,6 +1475,9 @@ def build_parser():
     g.add_argument("--shape", type=float, default=0.0, metavar="FRAMES_PER_SEC",
                    help="constant-rate traffic: one 1 KB frame every 1/RATE s, dummy frames fill the gaps "
                         "(e.g. 0.2 low, 1 normal, 4 high). Hides when you talk; costs bandwidth, limits speed")
+    g.add_argument("--ratchet", type=int, default=RATCHET_SECONDS, metavar="SECONDS",
+                   help="renew the session keys with a fresh Diffie-Hellman exchange about every SECONDS "
+                        f"(default {RATCHET_SECONDS}, 0 = off)")
     g = ap.add_argument_group("access control")
     g.add_argument("--closed", action="store_true", help="only allowlisted fingerprints may connect")
     g.add_argument("--allow", action="append", default=[], metavar="FP",
@@ -1401,6 +1500,7 @@ def apply_opts(node, args, secret=None):
         node.set_psk(secret)
     if args.cover:
         node.set_cover(True)
+    node.ratchet = max(0, args.ratchet)
     if args.shape and args.shape > 0:
         node.set_shape(args.shape)
 
