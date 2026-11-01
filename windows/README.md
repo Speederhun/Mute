@@ -4,6 +4,8 @@ Tested status: the shared core is tested on Linux. The Windows packaging and the
 instructions have **not** been tested on a real Windows machine yet - please open an issue
 if something does not work.
 
+> **Automatic:** `windows\install.bat` installs **Python, the dependencies and Tor** for you (see below). Nothing to download by hand.
+
 ## Easiest: one double-click installer
 
 Download the repository (green **Code** button > *Download ZIP*, unzip it) and double-click **`windows\install.bat`**.

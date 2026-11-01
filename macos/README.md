@@ -3,6 +3,8 @@
 Tested status: the shared core is tested on Linux. The macOS packaging and these instructions
 have **not** been tested on a real Mac yet - please open an issue if something does not work.
 
+> **Automatic:** `bash macos/install.sh` installs **Python, Tk, Tor and the dependencies** for you via Homebrew.
+
 ## One-command installer
 
 ```bash

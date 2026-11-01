@@ -6,6 +6,8 @@ Distribution-specific guides:
 - **[Arch Linux](arch.md)** (and derivatives: Manjaro, EndeavourOS)
 - **[Kali Linux](kali.md)** (and other Debian/Ubuntu-based systems)
 
+> **Automatic:** `bash linux/install.sh` installs **Python, Tkinter, Tor and the dependencies** for you - and never upgrades your system.
+
 ## One-command installer
 
 ```bash

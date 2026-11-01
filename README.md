@@ -44,20 +44,31 @@ Every release contains the binaries for that system, an installer pack (installs
 They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`), or manually:
 **Actions > build > Run workflow**, enter a version such as `v1.1.0`.
 
-## Install
+## Install (automatic)
 
-Pick your platform - each folder has its own guide and build script:
+The installers set everything up for you: **Python, Tkinter, Tor and all Python dependencies**. You do not have to download
+anything by hand.
 
-| Platform | Guide | Build script |
-|----------|-------|--------------|
-| Windows | [windows/README.md](windows/README.md) - double-click `windows/install.bat` (installs Python if needed) | `windows/build.bat` |
-| Linux | [linux/README.md](linux/README.md) - [Arch](linux/arch.md), [Kali](linux/kali.md) - `bash linux/install.sh` (installs Python, Tk, Tor) | `linux/build.sh` |
-| macOS | [macos/README.md](macos/README.md) - `bash macos/install.sh` (Homebrew: Python, Tk, Tor) | `macos/build.sh` |
+| Platform | Run | What it installs |
+|----------|-----|------------------|
+| **Windows** | double-click `windows\install.bat` | Python 3.12 (via `winget`, or python.org) if missing; a private environment with hash-checked dependencies; **Tor** (Tor Browser via `winget`, Mute uses its `tor.exe`) if missing; a desktop shortcut. No administrator rights. |
+| **Linux** | `bash linux/install.sh` | Python, Tkinter and **Tor** with your package manager (Arch/Manjaro, Debian/Ubuntu/Kali/Mint, Fedora, openSUSE); a private environment with hash-checked dependencies; a `mute` command and a menu entry. |
+| **macOS** | `bash macos/install.sh` | Python 3.12 + Tk and **Tor** via Homebrew (offers to install Homebrew first); a private environment with hash-checked dependencies; `~/Applications/Mute.app`. |
+
+Good to know:
+- **Linux never upgrades your system.** Only packages that are missing are installed, and your package manager shows what it will do and asks first.
+- Every step is skipped if it is already done (Python or Tor already installed, environment already created).
+- Without Tor, **DIRECT mode still works**; the installers tell you if Tor could not be set up.
+- Nothing is a black box: the scripts are plain text in `windows/`, `linux/` and `macos/`. `--dry-run` (Linux/macOS) prints what would be done.
+- Status: the logic is tested on Linux; the package-manager steps (apt, pacman, dnf, zypper, winget, Homebrew) and the Windows/macOS parts are not tested on real machines yet.
+
+Guides with more detail: [Windows](windows/README.md), [Linux](linux/README.md) ([Arch](linux/arch.md), [Kali](linux/kali.md)), [macOS](macos/README.md).
+Build scripts for single-file binaries: `windows/build.bat`, `linux/build.sh`, `macos/build.sh`.
 
 The GitHub Actions workflow (`.github/workflows/build.yml`) builds each platform separately
 (`Mute-windows`, `Mute-linux`, `Mute-macos`).
 
-Quick start from source on any platform:
+Manual install from source on any platform (if you prefer not to use the installers):
 ```bash
 git clone https://github.com/Speederhun/Mute-.git && cd Mute-
 python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
