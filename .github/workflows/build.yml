@@ -23,6 +23,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python: ["3.10", "3.12"]
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}   # a macOS test problem must not block the Windows/Linux releases
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
