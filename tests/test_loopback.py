@@ -552,4 +552,18 @@ finally:
     m.Channel._recv_frame = orig_rf
 CP.shutdown(); CQ.shutdown()
 
+# ---- stop (disconnect, stop listening, listen again)
+Z1, Z2 = mk("z1"), mk("z2")
+zp = m.free_port()
+Z1.listen(zp); Z2.connect("127.0.0.1", zp)
+ok(wait(lambda: Z1.chans and Z2.chans), "stop test: connected")
+Z1.stop()
+ok(Z1.server is None and not Z1.chans and Z1.transport == "direct", "stop closes the listener and all connections")
+ok(wait(lambda: not Z2.chans, 5), "the peer notices the disconnect")
+Z1.stop_requested.clear()
+Z1.listen(zp)
+Z3 = mk("z3"); Z3.connect("127.0.0.1", zp)
+ok(wait(lambda: Z1.chans and Z3.chans), "after stop the same port can be used again")
+Z1.shutdown(); Z2.shutdown(); Z3.shutdown()
+
 print("all loopback tests passed")

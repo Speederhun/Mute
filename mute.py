@@ -480,6 +480,10 @@ class Channel:
     def close(self):
         self.dead.set()
         try:
+            self.sock.shutdown(socket.SHUT_RDWR)   # wakes a thread blocked in recv and tells the peer
+        except OSError:
+            pass
+        try:
             self.sock.close()
         except OSError:
             pass
@@ -889,6 +893,7 @@ class Node:
         self.paused = threading.Event()   # set = file transfers paused
         self.speed_limit = 0              # bytes per second per peer, 0 = unlimited
         self.server = None
+        self.stop_requested = threading.Event()
         self.transport = "direct"
         self.socks_port = None
         self.onion = None
@@ -1527,26 +1532,43 @@ class Node:
             if tmp:
                 shutil.rmtree(tmp, ignore_errors=True)
 
-    def shutdown(self):
+    def stop(self):
+        """Stops listening, disconnects every peer and shuts Tor down, so START can be used again
+        (also with another mode). Works while Tor is still starting up."""
+        self.stop_requested.set()
         for ch in list(self.chans.values()):
             ch.close()
-        if self.server:
+        self.chans.clear()
+        srv, self.server = self.server, None
+        if srv:
             try:
-                self.server.close()
+                srv.shutdown(socket.SHUT_RDWR)     # wakes the thread waiting in accept() (Linux)
             except OSError:
                 pass
+            try:
+                srv.close()
+            except OSError:
+                pass
+        ctrl, proc, tdir = self.controller, self.tor_proc, self.tor_dir
+        self.controller = self.tor_proc = self.tor_dir = None
         try:
-            if self.controller:
-                self.controller.close()
+            if ctrl:
+                ctrl.close()
         except Exception:
             pass
         try:
-            if self.tor_proc:
-                self.tor_proc.terminate()
+            if proc:
+                proc.terminate()
         except Exception:
             pass
-        if self.tor_dir:
-            shutil.rmtree(self.tor_dir, ignore_errors=True)
+        if tdir:
+            shutil.rmtree(tdir, ignore_errors=True)
+        self.onion = None
+        self.transport = "direct"
+        self.socks_port = None
+
+    def shutdown(self):
+        self.stop()
 
 
 # ---------------------------------------------------------------- GUI (hacker style)
@@ -2073,6 +2095,9 @@ def main(args=None):
     mk_entry(f2, port_var, 6).grid(row=0, column=3, padx=4)
     start_btn = mk_btn(f2, "[ START ]", lambda: do_start())
     start_btn.grid(row=0, column=4, padx=6)
+    stop_btn = mk_btn(f2, "[ STOP ]", lambda: do_stop(), RED)
+    stop_btn.grid(row=0, column=5, padx=2)
+    stop_btn.config(state="disabled")
 
     f2b = tk.Frame(root, bg=BG)
     f2b.pack(fill="x", padx=8, pady=(2, 6))
@@ -2087,7 +2112,7 @@ def main(args=None):
              lambda: setattr(node, "scrub", scrub_var.get())).pack(side="left", padx=4)
     mk_btn(f2b, "Tor bridges...", lambda: edit_bridges(), DIM).pack(side="left", padx=8)
     mk_btn(f2b, "Options...", lambda: open_options(), ACC).pack(side="left", padx=2)
-    mk_btn(f2b, "LOCK", lambda: lock(), DIM).pack(side="left", padx=8)
+    mk_btn(f2b, "LOCK", lambda: manual_lock(), DIM).pack(side="left", padx=8)
 
     f3 = tk.Frame(root, bg=BG)
     f3.pack(fill="x", padx=8)
@@ -2201,12 +2226,26 @@ def main(args=None):
     lock_entry.pack()
     tk.Label(lock_frame, textvariable=lock_msg, bg=BG, fg=RED, font=FONT).pack(pady=6)
 
+    lock_asked = [False]
+
+    def manual_lock(_=None):
+        """LOCK button / Ctrl+L. The first time without a password it offers to set one."""
+        if not locked[0] and not lock_secret[0] and not lock_asked[0]:
+            lock_asked[0] = True
+            s = simpledialog.askstring(
+                "Lock password", "Choose a lock screen password.\n(Leave empty to lock without one - Enter unlocks.)\n"
+                "You can change it later in Options > lock password.", show="*", parent=root)
+            if s:
+                lock_secret[0] = s
+                log("Lock password set")
+        lock()
+
     def lock(_=None):
         if locked[0]:
             return
         locked[0] = True
         lock_var.set("")
-        lock_msg.set("" if lock_secret[0] else "press Enter to unlock (no lock password set)")
+        lock_msg.set("" if lock_secret[0] else "press Enter to unlock (set a password in Options > lock password)")
         lock_frame.place(x=0, y=0, relwidth=1, relheight=1)
         lock_frame.lift()
         lock_entry.focus_set()
@@ -2604,6 +2643,8 @@ def main(args=None):
         if node.server or node.transport == "tor":
             return log("Already running. Restart the app to change mode.", "err")
         start_btn.config(state="disabled")
+        stop_btn.config(state="normal")
+        node.stop_requested.clear()
 
         def run():
             try:
@@ -2614,12 +2655,28 @@ def main(args=None):
                     node.emit("addr", node.onion + f":{DEFAULT_PORT}")
                 else:
                     node.listen(port)
+                if node.stop_requested.is_set():
+                    node.stop()            # STOP was pressed while we were still starting
+                    return
                 if after:
                     after()
             except Exception as e:
+                if node.stop_requested.is_set():
+                    node.stop()
+                    return
                 node.emit("sys", f"Error: {e}")
+                node.stop()
                 node.emit("enable_start")
         threading.Thread(target=run, daemon=True).start()
+
+    def do_stop():
+        """STOP: disconnect everybody, stop listening, shut Tor down; START works again."""
+        node.stop()
+        addr_var.set(", ".join(local_ips()) or "?")
+        status_var.set("offline")
+        start_btn.config(state="normal")
+        stop_btn.config(state="disabled")
+        log("Stopped: disconnected, no longer listening" + (" and Tor shut down" if mode.get() == "tor" else ""))
 
     def do_connect():
         try:
@@ -2705,8 +2762,8 @@ def main(args=None):
             panic()
 
     entry.bind("<Return>", do_send)
-    root.bind_all("<Control-l>", lock)
-    root.bind_all("<Control-L>", lock)
+    root.bind_all("<Control-l>", manual_lock)
+    root.bind_all("<Control-L>", manual_lock)
     root.bind_all("<Control-Shift-Q>", panic)
     root.bind_all("<Control-Shift-q>", panic)
     root.bind_all("<Escape>", on_escape)
@@ -2739,6 +2796,7 @@ def main(args=None):
                     if name and name.strip():
                         node.names[fp] = name.strip()[:24]
                     log(f"[+] {node.label(fp)} ({short(fp)}) connected securely", tag_for(fp))
+                    stop_btn.config(state="normal")
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans))
                     notify()
                 elif k == "disconnected":
@@ -2748,6 +2806,7 @@ def main(args=None):
                     addr_var.set(ev[1])
                 elif k == "enable_start":
                     start_btn.config(state="normal")
+                    stop_btn.config(state="disabled")
                 elif k == "progress":
                     _, label, done, total, speed = ev
                     pct = int(100 * done / total) if total else 100

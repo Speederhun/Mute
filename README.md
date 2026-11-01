@@ -45,8 +45,8 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 
 Each platform has its **own release** on the [Releases page](../../releases): `windows-vX.Y.Z`, `linux-vX.Y.Z`, `macos-vX.Y.Z`.
 Every release contains the binaries for that system, an installer pack (installs Python/Tor if needed) and SHA-256 checksums.
-They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.2.0 && git push origin v1.2.0`), or manually:
-**Actions > build > Run workflow**, enter a version such as `v1.2.0`.
+They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.2.1 && git push origin v1.2.1`), or manually:
+**Actions > build > Run workflow**, enter a version such as `v1.2.1`.
 
 ### Verify your download
 
@@ -162,6 +162,12 @@ built-in ones without captcha (obfs4, snowflake, meek) or fresh obfs4 bridges af
 SOCKS5 proxy that can reach it (a VPN's proxy, another Tor; `--proxy HOST:PORT`). Bridges stay in memory like manually pasted ones. This talks to the real service
 over a normal HTTPS connection (not domain-fronted), so a censor that blocks that site *and* watches for it will see the request - then get bridges by email/web
 as before. Not yet verified against the live service by the author; the protocol is tested against a mock server.
+
+## Start, stop and lock
+
+**[ START ]** begins listening (and starts Tor in TOR mode); **[ STOP ]** disconnects everybody, stops listening and shuts Tor down again, so you can switch between DIRECT and TOR
+without restarting. **LOCK** / `Ctrl+L` covers the window; the first time it asks you to choose a lock password (leave it empty to unlock with just Enter, change it later in
+Options > lock password). Messages keep arriving while locked.
 
 ## Themes
 
