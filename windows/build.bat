@@ -7,8 +7,8 @@ python -m pip install pyinstaller || goto :error
 
 set OPTS=--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise --collect-all tkinterdnd2
 
-python -m PyInstaller %OPTS% --windowed --name Mute mute.py || goto :error
-python -m PyInstaller %OPTS% --name Mute-cli mute.py || goto :error
+python -m PyInstaller %OPTS% --windowed --icon assets\mute.ico --name Mute mute.py || goto :error
+python -m PyInstaller %OPTS% --icon assets\mute.ico --name Mute-cli mute.py || goto :error
 
 echo.
 echo Done: dist\Mute.exe (GUI) and dist\Mute-cli.exe (terminal mode)

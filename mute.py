@@ -1817,6 +1817,53 @@ def cover_estimate(profile):
     return f"about {kbs:.1f} KB/s per direction ({gb:.1f} GB per month per peer)"
 
 
+APP_ICON_PNG = (
+    "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"
+    "tp1H+fz/A/fOECO6vgz2AAAAAElFTkSuQmCC"
+)
+
 # ---------------------------------------------------------------- GUI themes
 # roles: bg, fg (main text), dim (secondary), acc (accent), red (errors), btn (button), ent (input), chat (chat area)
 THEMES = {
@@ -1890,6 +1937,10 @@ def main(args=None):
         DND_FILES = None
         root = tk.Tk()
     root.title("Mute")
+    try:                                   # window / taskbar icon (small PNG embedded, no extra file needed)
+        root.iconphoto(True, tk.PhotoImage(data=APP_ICON_PNG))
+    except Exception:
+        pass
     root.configure(bg=BG)
     root.geometry("860x760")
 

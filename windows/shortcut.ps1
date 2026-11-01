@@ -9,5 +9,7 @@ $s.TargetPath = $pyw
 $s.Arguments = '"' + (Join-Path $Root "mute.py") + '"'
 $s.WorkingDirectory = $Root
 $s.Description = "Mute"
+$ico = Join-Path $Root "assets\mute.ico"
+if (Test-Path $ico) { $s.IconLocation = $ico }
 $s.Save()
 Write-Host "Shortcut created: $lnk"
