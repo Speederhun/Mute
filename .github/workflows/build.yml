@@ -34,6 +34,7 @@ jobs:
       - run: python tests/test_scrub.py
       - run: python tests/test_loopback.py
       - run: python tests/test_fuzz.py
+      - run: python tests/test_themes.py
       - name: Package installs and starts
         run: |
           pip install --no-deps .

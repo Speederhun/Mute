@@ -144,6 +144,14 @@ Commands inside: `/send <file|folder>`, `/connect <host[:port]> [fp]`, `/peers`,
 In the GUI the same settings are under **Options...** (closed mode, allowlist, shared secret, relay, cover traffic, onion client keys,
 auto-clear, auto-lock, clipboard, notifications, screenshot block on Windows).
 
+## Themes
+
+Options > appearance switches the colours of the whole GUI instantly: **hacker** (default green), **amber** (old terminal), **ice**, **miami** (Miami-Vice
+pink/cyan on deep purple), **blood**, **light**, **paper** and **contrast** (white/yellow on black). The choice is remembered (not in burner/amnesia mode);
+start with `--theme miami` to pick one directly. All themes are checked for readable contrast by the tests.
+
+![Themes](docs/themes.png)
+
 ## Sending files comfortably
 
 Files and folders go into a **send queue** and are sent one after another in the order you added them. You can **pause / resume** and **cancel** the
@@ -229,7 +237,7 @@ requirements.lock   pinned dependencies with hashes (pip install --require-hashe
 SECURITY.md         how to report problems, what is and is not tested
 windows/ linux/ macos/   per-platform guides and build scripts
 tests/              scrubbing, loopback network/crypto, fuzz tests
-docs/               screenshot
+docs/               screenshots
 .github/            CI (test matrix, security checks, per-platform builds) and Dependabot
 ```
 

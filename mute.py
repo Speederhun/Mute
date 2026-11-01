@@ -1586,6 +1586,8 @@ def build_parser():
     g.add_argument("--ratchet", type=int, default=RATCHET_SECONDS, metavar="SECONDS",
                    help="renew the session keys with a fresh Diffie-Hellman exchange about every SECONDS "
                         f"(default {RATCHET_SECONDS}, 0 = off)")
+    g.add_argument("--theme", choices=sorted(THEMES), default=None,
+                   help="GUI colour theme (remembered; can also be changed in Options)")
     g = ap.add_argument_group("access control")
     g.add_argument("--closed", action="store_true", help="only allowlisted fingerprints may connect")
     g.add_argument("--allow", action="append", default=[], metavar="FP",
@@ -1613,6 +1615,56 @@ def apply_opts(node, args, secret=None):
         node.set_shape(args.shape)
 
 
+# ---------------------------------------------------------------- GUI themes
+# roles: bg, fg (main text), dim (secondary), acc (accent), red (errors), btn (button), ent (input), chat (chat area)
+THEMES = {
+    "hacker":   dict(bg="#000000", fg="#00ff41", dim="#0a7a28", acc="#00e5ff", red="#ff3b3b", btn="#001a00", ent="#050505", chat="#030803",
+                     pal=["#00e5ff", "#ffd166", "#ff6bd6", "#a78bfa", "#ff9f43", "#5eead4", "#f472b6", "#93c5fd"]),
+    "amber":    dict(bg="#0a0600", fg="#ffb000", dim="#9a6a00", acc="#ffd866", red="#ff5a3c", btn="#1f1400", ent="#120b00", chat="#0e0800",
+                     pal=["#ffd866", "#ff8c42", "#ffe8a3", "#d9a066", "#ff6b6b", "#c8e06c", "#e8c170", "#f2a65a"]),
+    "ice":      dict(bg="#04080f", fg="#9fd8ff", dim="#5b86a8", acc="#4fffe3", red="#ff6b81", btn="#0b1a2b", ent="#07111d", chat="#060d17",
+                     pal=["#4fffe3", "#ffd166", "#ff9ecf", "#b39bff", "#ffa94d", "#8bf5a8", "#7fb6ff", "#ff8fa3"]),
+    "miami":    dict(bg="#12002b", fg="#ff4fd8", dim="#a45fcf", acc="#00f0ff", red="#ff6a5c", btn="#2a0a5e", ent="#1b0640", chat="#0e0023",
+                     pal=["#00f0ff", "#ffe66d", "#ff9f43", "#7dffb3", "#c792ff", "#ff7eb6", "#4dd8ff", "#ffd6f5"]),
+    "blood":    dict(bg="#080000", fg="#ff3030", dim="#c03a3a", acc="#ff9a3c", red="#ffe0e0", btn="#1f0000", ent="#110000", chat="#0c0000",
+                     pal=["#ff9a3c", "#ffd166", "#ff6bd6", "#c792ff", "#ff7a7a", "#ffc2a1", "#f2d06b", "#ff8fa3"]),
+    "light":    dict(bg="#f4f5f7", fg="#14181f", dim="#5d6673", acc="#0a5fbf", red="#c0262d", btn="#dfe3ea", ent="#ffffff", chat="#fafbfc",
+                     pal=["#0a5fbf", "#8a5a00", "#b0176f", "#5b3fc4", "#b4470d", "#0b7a6e", "#a1244f", "#2d6fa8"]),
+    "paper":    dict(bg="#f3ead3", fg="#33281a", dim="#7d6c4f", acc="#8a3a0e", red="#a8141c", btn="#e3d6b6", ent="#fff9e8", chat="#f9f1dc",
+                     pal=["#8a3a0e", "#1f6f5c", "#6b2f8a", "#a05a00", "#8a1f4b", "#2a5d8a", "#5a6b0b", "#7a3c3c"]),
+    "contrast": dict(bg="#000000", fg="#ffffff", dim="#c8c8c8", acc="#ffff00", red="#ff6060", btn="#1c1c1c", ent="#0c0c0c", chat="#080808",
+                     pal=["#ffff00", "#00ffff", "#ff80ff", "#80ff80", "#ffa040", "#a0a0ff", "#ff8080", "#ffffff"]),
+}
+THEME_ROLES = ("bg", "fg", "dim", "acc", "red", "btn", "ent", "chat")
+THEME_OPTS = ("background", "foreground", "selectcolor", "activebackground", "activeforeground",
+              "insertbackground", "highlightbackground", "highlightcolor", "readonlybackground",
+              "buttonbackground", "troughcolor")
+
+
+def _lum(hexcol):
+    ch = [int(hexcol[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    ch = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in ch]
+    return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+
+
+def contrast_ratio(a, b):
+    la, lb = sorted((_lum(a), _lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def theme_file():
+    return os.path.join(APP_DIR, "theme.txt")
+
+
+def load_theme():
+    try:
+        with open(theme_file()) as f:
+            name = f.read().strip()
+        return name if name in THEMES else "hacker"
+    except OSError:
+        return "hacker"
+
+
 SHAPE_LABELS = [("off", 0.0), ("low  (1 frame / 5 s)", 0.2), ("normal (1 frame / s)", 1.0),
                 ("high (4 frames / s)", 4.0), ("fast (20 frames / s)", 20.0)]
 
@@ -1622,7 +1674,10 @@ def main(args=None):
     from tkinter import filedialog, messagebox, simpledialog
 
     args = args or build_parser().parse_args([])
-    BG, FG, DIM, ACC, RED = "#000000", "#00ff41", "#0a7a28", "#00e5ff", "#ff3b3b"
+    theme_name = args.theme or load_theme()
+    TH = THEMES[theme_name]
+    BG, FG, DIM, ACC, RED = TH["bg"], TH["fg"], TH["dim"], TH["acc"], TH["red"]
+    BTN, ENT, CHATBG, PALETTE = TH["btn"], TH["ent"], TH["chat"], list(TH["pal"])
     FONT = (("Consolas" if os.name == "nt" else
              "Menlo" if sys.platform == "darwin" else "DejaVu Sans Mono"), 10)
 
@@ -1705,20 +1760,20 @@ def main(args=None):
         return tk.Label(parent, text=text, bg=BG, fg=fg, font=FONT, anchor="w")
 
     def mk_entry(parent, var, width=20, show=None, state="normal"):
-        return tk.Entry(parent, textvariable=var, width=width, bg="#050505", fg=FG,
+        return tk.Entry(parent, textvariable=var, width=width, bg=ENT, fg=FG,
                         insertbackground=FG, relief="flat", font=FONT, show=show, state=state,
-                        readonlybackground="#050505", highlightthickness=1,
+                        readonlybackground=ENT, highlightthickness=1,
                         highlightbackground=DIM, highlightcolor=FG)
 
     def mk_btn(parent, text, cmd, fg=FG):
-        return tk.Button(parent, text=text, command=cmd, bg="#001a00", fg=fg, font=FONT,
+        return tk.Button(parent, text=text, command=cmd, bg=BTN, fg=fg, font=FONT,
                          relief="flat", bd=0, padx=8, pady=2, activebackground=fg,
-                         activeforeground="#000", highlightthickness=1,
+                         activeforeground=BG, highlightthickness=1,
                          highlightbackground=fg, cursor="hand2")
 
     def mk_check(parent, text, var, cmd=None):
         return tk.Checkbutton(parent, text=text, variable=var, bg=BG, fg=DIM,
-                              selectcolor="#001a00", activebackground=BG,
+                              selectcolor=BTN, activebackground=BG,
                               activeforeground=FG, font=FONT, command=cmd)
 
     def copy_text(s):
@@ -1757,7 +1812,7 @@ def main(args=None):
     f2.pack(fill="x", padx=8, pady=(6, 0))
     mode = tk.StringVar(value="tor" if args.tor else "direct")
     for i, (t, v) in enumerate((("DIRECT (IP:port)", "direct"), ("TOR (.onion, anonymous)", "tor"))):
-        tk.Radiobutton(f2, text=t, variable=mode, value=v, bg=BG, fg=FG, selectcolor="#001a00",
+        tk.Radiobutton(f2, text=t, variable=mode, value=v, bg=BG, fg=FG, selectcolor=BTN,
                        activebackground=BG, activeforeground=FG, font=FONT).grid(row=0, column=i, padx=4)
     mk_label(f2, "port:", DIM).grid(row=0, column=2)
     port_var = tk.StringVar(value=str(args.port))
@@ -1795,14 +1850,13 @@ def main(args=None):
     status_var = tk.StringVar(value="offline")
     tk.Label(root, textvariable=status_var, bg=BG, fg=ACC, font=FONT, anchor="w").pack(fill="x", padx=8, pady=2)
 
-    chat = tk.Text(root, bg="#030803", fg=FG, font=FONT, wrap="word", state="disabled",
+    chat = tk.Text(root, bg=CHATBG, fg=FG, font=FONT, wrap="word", state="disabled",
                    relief="flat", highlightthickness=1, highlightbackground=DIM, height=14)
     chat.pack(fill="both", expand=True, padx=8, pady=4)
     chat.tag_config("me", foreground=FG)
     chat.tag_config("peer", foreground=ACC)
     chat.tag_config("sys", foreground=DIM)
     chat.tag_config("err", foreground=RED)
-    PALETTE = [ACC, "#ffd166", "#ff6bd6", "#a78bfa", "#ff9f43", "#5eead4", "#f472b6", "#93c5fd"]
     peer_tag = {}
     chat_lines = []  # (epoch, text, tag) - lets the auto-clear timer remove old lines
 
@@ -1812,6 +1866,44 @@ def main(args=None):
             chat.tag_config(tag, foreground=PALETTE[len(peer_tag) % len(PALETTE)])
             peer_tag[fp] = tag
         return peer_tag[fp]
+
+    def apply_theme(name, save=True):
+        """Switches the colours of every open window at once."""
+        nonlocal BG, FG, DIM, ACC, RED, BTN, ENT, CHATBG, PALETTE, theme_name
+        old, new = THEMES[theme_name], THEMES[name]
+        rev = {old[k].lower(): new[k] for k in THEME_ROLES}
+
+        def walk(w):
+            for opt in THEME_OPTS:
+                try:
+                    v = str(w.cget(opt)).lower()
+                except tk.TclError:
+                    continue
+                if v in rev and v != rev[v].lower():
+                    try:
+                        w.configure(**{opt: rev[v]})
+                    except tk.TclError:
+                        pass
+            for c in w.winfo_children():
+                walk(c)
+        walk(root)
+        root.configure(bg=new["bg"])
+        chat.tag_config("me", foreground=new["fg"])
+        chat.tag_config("peer", foreground=new["acc"])
+        chat.tag_config("sys", foreground=new["dim"])
+        chat.tag_config("err", foreground=new["red"])
+        for i in range(len(peer_tag)):
+            chat.tag_config(f"peer{i}", foreground=new["pal"][i % len(new["pal"])])
+        theme_name = name
+        BG, FG, DIM, ACC, RED = new["bg"], new["fg"], new["dim"], new["acc"], new["red"]
+        BTN, ENT, CHATBG, PALETTE = new["btn"], new["ent"], new["chat"], list(new["pal"])
+        if save and not (burner or args.amnesia):
+            try:
+                os.makedirs(APP_DIR, exist_ok=True)
+                with open(theme_file(), "w") as f:
+                    f.write(name)
+            except OSError:
+                pass
 
     def render():
         chat.config(state="normal")
@@ -1942,7 +2034,7 @@ def main(args=None):
         win.title(title)
         win.configure(bg=BG)
         tk.Label(win, bg=BG, fg=FG, font=FONT, justify="left", text=intro).pack(padx=8, pady=6)
-        txt = tk.Text(win, height=8, width=84, bg="#050505", fg=FG, insertbackground=FG,
+        txt = tk.Text(win, height=8, width=84, bg=ENT, fg=FG, insertbackground=FG,
                       font=FONT, relief="flat", highlightthickness=1, highlightbackground=DIM)
         txt.pack(padx=8)
         txt.insert("1.0", initial)
@@ -2041,8 +2133,8 @@ def main(args=None):
             r += 1
 
         def spin(var):
-            return tk.Spinbox(win, from_=0, to=999, width=5, textvariable=var, bg="#050505", fg=FG,
-                              buttonbackground="#001a00", insertbackground=FG, font=FONT, relief="flat")
+            return tk.Spinbox(win, from_=0, to=999, width=5, textvariable=var, bg=ENT, fg=FG,
+                              buttonbackground=BTN, insertbackground=FG, font=FONT, relief="flat")
 
         section("access control")
         row(mk_check(win, "closed mode (only allowlisted fingerprints connect)", closed_var,
@@ -2061,7 +2153,7 @@ def main(args=None):
             est_var.set(shape_estimate(rate, node.transport == "tor") if rate else "")
             log("Constant-rate traffic: " + (shape_estimate(rate, node.transport == "tor") if rate else "off"))
         om = tk.OptionMenu(win, shape_var, *[l for l, _ in SHAPE_LABELS], command=apply_shape)
-        om.config(bg="#001a00", fg=FG, activebackground=FG, activeforeground="#000", font=FONT,
+        om.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT,
                   relief="flat", highlightthickness=1, highlightbackground=DIM)
         row(tk.Label(win, text="constant-rate traffic (hides when you talk)", bg=BG, fg=DIM, font=FONT), om)
         tk.Label(win, textvariable=est_var, bg=BG, fg=ACC, font=FONT, anchor="w").grid(
@@ -2069,6 +2161,12 @@ def main(args=None):
         r += 1
         row(mk_btn(win, "my onion client key...", show_client_key, DIM),
             mk_btn(win, "allowed onion clients...", edit_allowed_clients, DIM))
+        section("appearance")
+        theme_var = tk.StringVar(value=theme_name)
+        tm = tk.OptionMenu(win, theme_var, *THEMES, command=lambda v: apply_theme(v))
+        tm.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT,
+                  relief="flat", highlightthickness=1, highlightbackground=DIM)
+        row(tk.Label(win, text="colour theme", bg=BG, fg=DIM, font=FONT), tm)
         section("file transfer")
         limit_var = tk.StringVar(value=str(node.speed_limit // 1024))
 
