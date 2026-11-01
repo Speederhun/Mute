@@ -44,8 +44,8 @@ Pick your platform - each folder has its own guide and build script:
 | Platform | Guide | Build script |
 |----------|-------|--------------|
 | Windows | [windows/README.md](windows/README.md) - double-click `windows/install.bat` (installs Python if needed) | `windows/build.bat` |
-| Linux | [linux/README.md](linux/README.md) - [Arch](linux/arch.md), [Kali](linux/kali.md) | `linux/build.sh` |
-| macOS | [macos/README.md](macos/README.md) | `macos/build.sh` |
+| Linux | [linux/README.md](linux/README.md) - [Arch](linux/arch.md), [Kali](linux/kali.md) - `bash linux/install.sh` (installs Python, Tk, Tor) | `linux/build.sh` |
+| macOS | [macos/README.md](macos/README.md) - `bash macos/install.sh` (Homebrew: Python, Tk, Tor) | `macos/build.sh` |
 
 The GitHub Actions workflow (`.github/workflows/build.yml`) builds each platform separately
 (`Mute-windows`, `Mute-linux`, `Mute-macos`).

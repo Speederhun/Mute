@@ -12,6 +12,9 @@ sudo pacman -S --needed python tk tor git
 - `tor` - needed for Tor mode (Mute starts its own private Tor process; you do **not** need to
   enable or start the `tor.service` system daemon)
 
+> **Shortcut:** `bash linux/install.sh` does steps 1-3 for you (pacman packages, venv, launcher).
+> If pacman complains about missing files or version mismatches, run `sudo pacman -Syu` first.
+
 ## 2. Get Mute and install the Python packages in a virtual environment
 
 Arch marks the system Python as externally managed, so use a venv:

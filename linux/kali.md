@@ -15,6 +15,8 @@ sudo apt install -y python3 python3-venv python3-tk tor git
   it launches its own private Tor on random local ports, so the two do not conflict.
   If you do not need the system daemon: `sudo systemctl disable --now tor`.
 
+> **Shortcut:** `bash linux/install.sh` does steps 1-3 for you (apt packages incl. bridge helpers if available, venv, launcher).
+
 ## 2. Get Mute and install the Python packages in a virtual environment
 
 ```bash

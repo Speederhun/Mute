@@ -3,6 +3,17 @@
 Tested status: the shared core is tested on Linux. The macOS packaging and these instructions
 have **not** been tested on a real Mac yet - please open an issue if something does not work.
 
+## One-command installer
+
+```bash
+git clone https://github.com/Speederhun/Mute-.git && cd Mute-
+bash macos/install.sh
+```
+Uses [Homebrew](https://brew.sh) (it offers to install it with the official installer if missing) for Python 3.12 + Tk and **Tor**,
+creates a private environment with hash-checked dependencies and `~/Applications/Mute.app`. Use `--yes` to skip the question,
+`--dry-run` to only print the steps. The environment/launcher logic was tested on Linux; **the Homebrew steps and the app
+bundle have not been tested on a real Mac.** If macOS blocks the first start: right-click > Open.
+
 ## Run from source
 
 1. Python 3.10+ **with Tkinter**: either the installer from [python.org](https://www.python.org/downloads/macos/)

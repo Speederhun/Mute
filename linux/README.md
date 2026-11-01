@@ -6,6 +6,18 @@ Distribution-specific guides:
 - **[Arch Linux](arch.md)** (and derivatives: Manjaro, EndeavourOS)
 - **[Kali Linux](kali.md)** (and other Debian/Ubuntu-based systems)
 
+## One-command installer
+
+```bash
+git clone https://github.com/Speederhun/Mute-.git && cd Mute-
+bash linux/install.sh
+```
+It detects your distribution (Arch/Manjaro, Debian/Ubuntu/Kali/Mint, Fedora, openSUSE), installs Python, Tkinter and **Tor**
+with your package manager (asks for your sudo password), creates a private environment with hash-checked dependencies,
+a `mute` command in `~/.local/bin` and an application-menu entry. `--dry-run` only prints what it would do,
+`--no-packages` skips the system packages. Tested on Linux in a sandbox without installing packages
+(dry-run for every distribution, full environment/launcher setup); the package-manager steps themselves are untested.
+
 ## Generic quick start
 
 Requirements: Python 3.10+, Tkinter (for the GUI), and `tor` for Tor mode.
