@@ -18,7 +18,7 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
   - **DIRECT** - plain TCP to `IP:port` (LAN, port forward, or any VPN address such as Tailscale/WireGuard).
   - **TOR** - built-in onion service: works across networks and through NAT without port forwarding, and hides both IP addresses. Optional **bridges** (obfs4, meek_lite, snowflake) hide that you use Tor.
 - **Strong, standard cryptography**: Noise_XX_25519_ChaChaPoly_SHA256 handshake, mutual authentication, forward secrecy, identities encrypted on the wire, symmetric key ratchet plus a fresh Diffie-Hellman key renewal every ~10 minutes, message padding.
-- **Files and folders**: large files in chunks with speed/ETA, **resumable** after an interruption, folders sent as a clean zip.
+- **Files and folders**: send queue, pause/resume/cancel, speed limit and drag & drop; large files in chunks with speed/ETA, **resumable** after an interruption, folders sent as a clean zip.
 - **Metadata scrubbing** (on by default) for outgoing files - see below.
 - **Group chat**: connect to several peers; messages and files go to everyone you are connected to (full mesh, or via a relay hub).
 - **Know who is writing**: every peer is identified by its cryptographic key. When someone connects you give them a name
@@ -37,6 +37,8 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
   and **cover traffic** (dummy frames, optionally imitating chat, browsing or streaming patterns).
 - **Passphrase-protected identity key** (scrypt + ChaCha20-Poly1305); the list of known peers is encrypted with the same passphrase.
 - **Hygiene options**: clipboard auto-clear after 30 s, notifications without message content, screenshot/recording block on Windows.
+- **Themes**: hacker, amber, ice, Miami-Vice, blood, light, paper and high-contrast, switchable live.
+- **Network extras**: SOCKS5 proxy for direct connections, IPv6, automatic Tor bridge download (Moat).
 - Runs on **Windows, Linux and macOS** from one Python file (`mute.py`).
 
 ## Download
