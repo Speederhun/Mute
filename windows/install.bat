@@ -65,7 +65,8 @@ goto :finish
 
 :havetor
 echo      Using Tor: %TOREXE%
-> "%CD%\tor_path.txt" echo %TOREXE%
+rem the path is written by PowerShell as UTF-8 (cmd would mangle folder names with accents)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0find-tor.ps1" -Out "%CD%\tor_path.txt" >nul
 
 :finish
 echo.
