@@ -34,7 +34,7 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 - **Constant-rate traffic** (optional): every frame is the same size and goes out on a fixed clock, with dummy frames in the gaps, so an
   observer cannot see *when* you talk or *how much*. Costs bandwidth and limits speed - see the table below.
 - **Group chat extras**: optional **relay hub** (one person forwards messages between peers who are not connected to each other)
-  and **cover traffic** (random dummy frames so idle and active periods look alike).
+  and **cover traffic** (dummy frames, optionally imitating chat, browsing or streaming patterns).
 - **Passphrase-protected identity key** (scrypt + ChaCha20-Poly1305); the list of known peers is encrypted with the same passphrase.
 - **Hygiene options**: clipboard auto-clear after 30 s, notifications without message content, screenshot/recording block on Windows.
 - Runs on **Windows, Linux and macOS** from one Python file (`mute.py`).
@@ -130,6 +130,7 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--psk` | both sides enter the same secret before connecting |
 | `--relay` | forward chat messages between your peers (hub) |
 | `--cover` | send dummy traffic at random intervals |
+| `--cover-profile P` | dummy traffic that imitates a usage pattern: `random`, `chat`, `browse` or `stream` (implies `--cover`); also `/cover chat` inside the chat |
 | `--proxy HOST:PORT` | send direct connections through a SOCKS5 proxy (your IP stays hidden from the peer; never falls back to a direct connection); also used for `--get-bridges` |
 | `--ratchet SECONDS` | renew the session keys with a fresh Diffie-Hellman exchange about every `SECONDS` (default 600, `0` = off) |
 | `--shape RATE` | constant-rate traffic, `RATE` frames per second (e.g. `0.2` low, `1` normal, `4` high); also `/shape` inside the chat |
@@ -174,6 +175,21 @@ Files and folders go into a **send queue** and are sent one after another in the
 running transfer (the receiver deletes the unfinished part), cancel files that are still waiting, and set a **speed limit** per peer
 (Options > file transfer, or `/limit 500` for 500 KB/s). Interrupted transfers still resume from where they stopped. In the GUI you can also
 **drag and drop** files or folders onto the window (uses the optional `tkinterdnd2` package; without it the buttons work as before).
+
+## Cover traffic profiles
+
+`--cover` alone sends a random dummy frame every few seconds. With a **profile** the dummy traffic follows the rhythm of a real application instead, so the
+overall size and timing statistics of the connection look like that application rather than like a chat:
+
+| profile | imitates | extra traffic (about) |
+|---|---|---|
+| `chat` | messenger: 1-4 tiny typing frames, then a long pause | 0.1 KB/s, 0.2 GB/month |
+| `browse` | web page loads: small request, burst of 8-30 replies of varying size, pause | 5 KB/s, 14 GB/month |
+| `stream` | video streaming: a 20-45 KB segment burst every few seconds | 53 KB/s, 140 GB/month |
+
+Choose it in Options > cover traffic or with `--cover-profile browse`. **Honest limits:** this only reshapes sizes and timing; the bytes are still an encrypted
+Mute stream, so an observer who inspects the protocol (or the destination) can still tell it is not a video call. The dummy traffic is not coordinated with your real
+messages, so your real messages remain visible as extra bursts; only **constant-rate mode** hides *when* you talk. The profiles do not apply while constant-rate mode is on.
 
 ## Constant-rate traffic
 

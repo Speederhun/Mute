@@ -507,4 +507,49 @@ if have6:
 else:
     print("SKIP IPv6 loopback (no IPv6 on this machine)")
 
+# ---- cover traffic profiles
+import random as _rnd
+for prof in m.COVER_PROFILES:
+    r = _rnd.Random(3)
+    eps = [m.cover_plan(prof, r) for _ in range(300)]
+    ok(all(w >= 0 and 0 <= n <= m.COVER_MAX and idle > 0 for steps, idle in eps for w, n in steps), f"{prof}: plans are valid")
+    ok(m.cover_estimate(prof).startswith("about"), f"{prof}: estimate available")
+avg = lambda prof, f: sum(f(m.cover_plan(prof, _rnd.Random(i))) for i in range(300)) / 300
+rate = lambda prof: float(m.cover_estimate(prof).split()[1])
+ok(rate("stream") > 5 * rate("browse") > 5 * 5 * rate("chat"), "average load: stream >> browse >> chat")
+ok(avg("chat", lambda e: e[1]) > 3 * avg("stream", lambda e: e[1]), "chat pauses are far longer than streaming pauses")
+ok(max(n for steps, _ in (m.cover_plan("chat", _rnd.Random(i)) for i in range(300)) for _, n in steps) <= 120, "chat messages are tiny")
+ok(sum(1 for i in range(300) if len(m.cover_plan("browse", _rnd.Random(i))[0]) >= 9) == 300, "browse: request followed by a burst of replies")
+
+CP, CQ = mk("cp"), mk("cq")
+cport = m.free_port(); CP.listen(cport); CQ.connect("127.0.0.1", cport)
+ok(wait(lambda: CP.chans and CQ.chans), "cover profile test nodes connected")
+got = []
+orig_rf = m.Channel._recv_frame
+def spy(self):
+    typ, data = orig_rf(self)
+    if typ == m.T_COVER:
+        got.append((time.time(), len(data)))
+    return typ, data
+m.Channel._recv_frame = spy
+try:
+    CQ.set_cover(True, "stream")
+    ok(wait(lambda: len(got) >= 6, 20), "stream profile produces bursts of dummy frames")
+    ok(max(n for _, n in got) >= 20000, "stream dummy frames are large (media-segment like)")
+    CQ.set_cover(False)
+    time.sleep(0.5); n0 = len(got); time.sleep(3)
+    ok(len(got) - n0 <= 1, "turning cover traffic off stops it right away")
+    CQ.set_cover(True, "chat")
+    got.clear()
+    CP.send_text("real message during chat cover")
+    ok(wait(lambda: any(e[2] == "real message during chat cover" for e in events(CQ, "msg"))), "real messages still work with cover traffic")
+    try:
+        CQ.set_cover(True, "nonsense"); ok(False, "unknown profile")
+    except ValueError:
+        ok(True, "unknown profile is rejected")
+    CQ.set_cover(False)
+finally:
+    m.Channel._recv_frame = orig_rf
+CP.shutdown(); CQ.shutdown()
+
 print("all loopback tests passed")

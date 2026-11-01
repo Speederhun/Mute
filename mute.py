@@ -871,6 +871,8 @@ class Node:
         self.closed = False       # closed mode: only allowlisted fingerprints may connect
         self.psk = None           # optional pre-shared secret (32 bytes, memory only)
         self.relay = False        # hub mode: forward chat messages between your peers
+        self.cover_profile = "random"
+        self._cover_ev = threading.Event()
         self.cover = False        # send dummy frames to hide when you are idle/active
         self.proxy = None                # (host, port) SOCKS5 proxy for direct connections
         self.ratchet = RATCHET_SECONDS   # fresh DH key renewal interval in seconds (0 = off)
@@ -957,23 +959,38 @@ class Node:
             return
         self.psk = Scrypt(salt=b"Mute/psk/v1", length=32, n=2 ** 16, r=8, p=1).derive(secret.encode())
 
-    def set_cover(self, on):
+    def set_cover(self, on, profile=None):
+        """Dummy traffic that imitates a usage pattern (see COVER_PROFILES). Unlike constant-rate mode it
+        only adds noise on top of real traffic - it does not hide when you really talk."""
+        if profile:
+            if profile not in COVER_PROFILES:
+                raise ValueError("Unknown cover profile: " + profile)
+            self.cover_profile = profile
         self.cover = bool(on)
-        if self.cover and not (self._cover_thread and self._cover_thread.is_alive()):
-            self._cover_thread = threading.Thread(target=self._cover_loop, daemon=True)
-            self._cover_thread.start()
+        if not self.cover:
+            self._cover_ev.set()
+        else:
+            self._cover_ev.clear()
+            if not (self._cover_thread and self._cover_thread.is_alive()):
+                self._cover_thread = threading.Thread(target=self._cover_loop, daemon=True)
+                self._cover_thread.start()
 
     def _cover_loop(self):
         rnd = random.SystemRandom()
         while self.cover:
-            time.sleep(rnd.uniform(2, 9))
-            for ch in list(self.chans.values()):
-                if ch.rate > 0:
-                    continue  # constant-rate mode already fills the silence
-                try:
-                    ch.send(T_COVER, os.urandom(rnd.choice([0, 200, 700, 1500])))
-                except OSError:
-                    pass
+            steps, idle = cover_plan(self.cover_profile, rnd)
+            for wait_s, size in steps + [(idle, None)]:
+                if self._cover_ev.wait(wait_s) or not self.cover:
+                    break
+                if size is None:
+                    continue
+                for ch in list(self.chans.values()):
+                    if ch.rate > 0:
+                        continue  # constant-rate mode already fills the silence
+                    try:
+                        ch.send(T_COVER, os.urandom(size))
+                    except (OSError, ConnectionError):
+                        pass
 
     def set_shape(self, rate):
         """Constant-rate traffic: every frame is 1 KB and goes out on a fixed clock (dummy frames fill
@@ -1606,7 +1623,9 @@ def build_parser():
     g.add_argument("--persistent", action="store_true", help="GUI: skip the identity question, use the saved identity")
     g.add_argument("--amnesia", action="store_true", help="save nothing")
     g.add_argument("--no-scrub", action="store_true", help="do not scrub metadata from sent files")
-    g.add_argument("--cover", action="store_true", help="send dummy traffic at random intervals")
+    g.add_argument("--cover", action="store_true", help="send dummy traffic (see --cover-profile)")
+    g.add_argument("--cover-profile", choices=sorted(COVER_PROFILES), default=None,
+                   help="what the dummy traffic imitates: random (default), chat, browse or stream; implies --cover")
     g.add_argument("--shape", type=float, default=0.0, metavar="FRAMES_PER_SEC",
                    help="constant-rate traffic: one 1 KB frame every 1/RATE s, dummy frames fill the gaps "
                         "(e.g. 0.2 low, 1 normal, 4 high). Hides when you talk; costs bandwidth, limits speed")
@@ -1635,8 +1654,8 @@ def apply_opts(node, args, secret=None):
         node.set_allowed_clients("\n".join(args.allow_client))
     if secret:
         node.set_psk(secret)
-    if args.cover:
-        node.set_cover(True)
+    if args.cover or args.cover_profile:
+        node.set_cover(True, args.cover_profile or "random")
     node.ratchet = max(0, args.ratchet)
     node.proxy = parse_proxy(args.proxy)
     if args.shape and args.shape > 0:
@@ -1759,6 +1778,45 @@ def parse_proxy(text):
     return host, port
 
 
+# ---------------------------------------------------------------- cover traffic profiles
+COVER_PROFILES = {
+    "random": "random dummy frames every few seconds",
+    "chat":   "messenger: short typing bursts, long pauses",
+    "browse": "web browsing: a small request, then a burst of larger replies, pauses in between",
+    "stream": "video streaming: a media segment every few seconds (heavy, about 50 KB/s)",
+}
+COVER_MAX = 48000                      # largest dummy payload (stays below the frame limit)
+
+
+def cover_plan(profile, rnd):
+    """One 'episode' of dummy traffic: ([(wait_before_s, payload_bytes), ...], idle_seconds_after)."""
+    if profile == "chat":
+        steps = [(rnd.uniform(0.4, 1.6), rnd.randint(0, 120)) for _ in range(rnd.randint(1, 4))]
+        return steps, min(120.0, max(3.0, rnd.expovariate(1 / 25)))
+    if profile == "browse":
+        steps = [(0.0, rnd.randint(300, 900))]
+        for _ in range(rnd.randint(8, 30)):
+            steps.append((rnd.uniform(0.02, 0.25), min(COVER_MAX, max(200, int(rnd.lognormvariate(8.5, 1.0))))))
+        return steps, rnd.uniform(8, 45)
+    if profile == "stream":
+        steps = [(rnd.uniform(0.05, 0.3), rnd.randint(20000, 45000)) for _ in range(rnd.randint(6, 10))]
+        return steps, rnd.uniform(2.5, 4.5)
+    return [(0.0, rnd.choice([0, 200, 700, 1500]))], rnd.uniform(2, 9)
+
+
+def cover_estimate(profile):
+    """Average extra traffic (per direction, per peer) of a cover profile, as readable text."""
+    rnd = random.Random(7)
+    total, secs = 0, 0.0
+    for _ in range(3000):
+        steps, idle = cover_plan(profile, rnd)
+        total += sum(-(-(5 + n) // PAD) * PAD for _, n in steps)   # every frame is padded to 1 KB units
+        secs += sum(w for w, _ in steps) + idle
+    kbs = total / secs / 1024
+    gb = kbs * 1024 * 86400 * 30 / 1e9
+    return f"about {kbs:.1f} KB/s per direction ({gb:.1f} GB per month per peer)"
+
+
 # ---------------------------------------------------------------- GUI themes
 # roles: bg, fg (main text), dim (secondary), acc (accent), red (errors), btn (button), ent (input), chat (chat area)
 THEMES = {
@@ -1877,7 +1935,8 @@ def main(args=None):
     # --- option variables
     closed_var = tk.BooleanVar(value=args.closed)
     relay_var = tk.BooleanVar(value=args.relay)
-    cover_var = tk.BooleanVar(value=args.cover)
+    cover_var = tk.BooleanVar(value=bool(args.cover or args.cover_profile))
+    cover_prof_var = tk.StringVar(value=args.cover_profile or "random")
     shape_var = tk.StringVar(value=SHAPE_LABELS[0][0])
     notify_var = tk.BooleanVar(value=True)
     clip_var = tk.BooleanVar(value=True)
@@ -2405,8 +2464,21 @@ def main(args=None):
         row(mk_check(win, "relay hub (forward messages between my peers)", relay_var,
                      lambda: setattr(node, "relay", relay_var.get())))
         section("network privacy")
-        row(mk_check(win, "cover traffic (random dummy frames)", cover_var,
-                     lambda: node.set_cover(cover_var.get())))
+        cov_note = tk.StringVar(value="")
+
+        def apply_cover(*_):
+            node.set_cover(cover_var.get(), cover_prof_var.get())
+            cov_note.set(f"{COVER_PROFILES[cover_prof_var.get()]} - {cover_estimate(cover_prof_var.get())}"
+                         if cover_var.get() else "")
+        cm = tk.OptionMenu(win, cover_prof_var, *COVER_PROFILES, command=apply_cover)
+        cm.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT,
+                  relief="flat", highlightthickness=1, highlightbackground=DIM)
+        row(mk_check(win, "cover traffic (dummy frames imitating...)", cover_var, apply_cover), cm)
+        tk.Label(win, textvariable=cov_note, bg=BG, fg=ACC, font=FONT, anchor="w", wraplength=560, justify="left").grid(
+            row=r, column=0, columnspan=3, sticky="w", padx=8)
+        r += 1
+        if cover_var.get():
+            apply_cover()
         est_var = tk.StringVar(value=shape_estimate(node.shape, node.transport == "tor") if node.shape else "")
 
         def apply_shape(*_):
@@ -2782,7 +2854,7 @@ def cli_main(args):
     if node.shape:
         print("[*] Constant-rate traffic:", shape_estimate(node.shape, args.tor))
     print("Commands: /send <file|folder>  /connect <host[:port]> [fp]  /peers  /name <id> <name>  /fp  /words\n"
-          "          /allow <fp>  /relay on|off  /cover on|off  /shape <frames/s|off>  /limit <KB/s|off>\n          /queue  /pause  /resume  /cancel [id|all]  /quit\n"
+          "          /allow <fp>  /relay on|off  /cover on|off|chat|browse|stream  /shape <frames/s|off>  /limit <KB/s|off>\n          /queue  /pause  /resume  /cancel [id|all]  /quit\n"
           "          (other text goes to everyone)")
     try:
         for line in sys.stdin:
@@ -2803,12 +2875,14 @@ def cli_main(args):
                     print("[!] That is not a valid fingerprint (32 hex characters)")
             elif line.startswith("/relay ") or line.startswith("/cover "):
                 cmd, _, val = line.partition(" ")
-                on = val.strip().lower() in ("on", "1", "yes")
+                val = val.strip().lower()
+                on = val in ("on", "1", "yes") or val in COVER_PROFILES
                 if cmd == "/relay":
                     node.relay = on
+                    print(f"[*] relay {'on' if on else 'off'}")
                 else:
-                    node.set_cover(on)
-                print(f"[*] {cmd[1:]} {'on' if on else 'off'}")
+                    node.set_cover(on, val if val in COVER_PROFILES else None)
+                    print("[*] cover traffic: " + (f"{node.cover_profile} - {cover_estimate(node.cover_profile)}" if on else "off"))
             elif line.startswith("/shape "):
                 val = line[7:].strip().lower()
                 try:
