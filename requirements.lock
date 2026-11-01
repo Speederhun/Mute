@@ -183,6 +183,10 @@ pysocks==1.7.1 \
 stem==1.8.2 \
     --hash=sha256:83fb19ffd4c9f82207c006051480389f80af221a7e4783000aedec4e384eb582
     # via mute-chat (pyproject.toml)
+tkinterdnd2==0.7.0 \
+    --hash=sha256:bc5039c28092a702ee70fe15bd9b948cb579571e3b46ba4a092c9929966ca9f3 \
+    --hash=sha256:f93d4f5ad439648ba1673f15db3e271cdd08f075c87f43553ffcdde4e634a717
+    # via mute-chat (pyproject.toml)
 typing-extensions==4.16.0 ; python_full_version < '3.11' \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5

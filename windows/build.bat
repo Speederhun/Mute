@@ -5,7 +5,7 @@ cd /d "%~dp0.."
 python -m pip install --require-hashes -r requirements.lock || goto :error
 python -m pip install pyinstaller || goto :error
 
-set OPTS=--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise
+set OPTS=--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise --collect-all tkinterdnd2
 
 python -m PyInstaller %OPTS% --windowed --name Mute mute.py || goto :error
 python -m PyInstaller %OPTS% --name Mute-cli mute.py || goto :error

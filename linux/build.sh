@@ -11,7 +11,7 @@ python -m pip install --require-hashes -r requirements.lock
 python -m pip install pyinstaller
 python -m PyInstaller --onefile --name Mute \
   --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
-  --collect-submodules noise mute.py
+  --collect-submodules noise --collect-all tkinterdnd2 mute.py
 
 echo
 echo "Done: dist/Mute"

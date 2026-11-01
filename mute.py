@@ -19,6 +19,7 @@ Cryptography:
 import base64
 import hashlib
 import hmac
+import itertools
 import json
 import os
 import queue
@@ -59,6 +60,7 @@ MAX_FRAME = 65535 + 64
 
 T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
 T_RELAY, T_COVER, T_FRAG = 6, 7, 8
+T_FILE_CANCEL = 12            # sender abandons the running file transfer
 T_RATCH_INIT, T_RATCH_ACK, T_RATCH_DONE = 9, 10, 11   # fresh Diffie-Hellman key renewal
 RATCHET_SECONDS = 600        # default: new ephemeral DH exchange about every 10 minutes (0 = off)
 
@@ -868,7 +870,12 @@ class Node:
         self.allowed_clients = [] # onion client public keys allowed to reach your service
         self.chans = {}     # fp -> Channel
         self.state_lock = threading.Lock()
-        self.send_lock = threading.Lock()
+        self.send_queue = []              # files waiting to be sent (and the one being sent)
+        self._queue_lock = threading.Lock()
+        self._queue_worker = None
+        self._qid = itertools.count(1)
+        self.paused = threading.Event()   # set = file transfers paused
+        self.speed_limit = 0              # bytes per second per peer, 0 = unlimited
         self.server = None
         self.transport = "direct"
         self.socks_port = None
@@ -1266,6 +1273,16 @@ class Node:
                         path = name
                     self.emit("progress", "RX", total, total, 0)
                     self.emit("file", fp, path, ok)
+                elif typ == T_FILE_CANCEL:
+                    if fobj:
+                        fobj.close()
+                        fobj = None
+                        try:
+                            os.remove(part)
+                        except OSError:
+                            pass
+                        self.emit("progress", "RX", 0, 0, 0)
+                        self.emit("sys", f"{self.label(fp)} cancelled the transfer of {name}")
                 elif typ == T_FILE_OFFSET:
                     chan.offset_q.put(struct.unpack(">Q", data[:8])[0])
                 elif typ == T_RELAY:
@@ -1304,88 +1321,179 @@ class Node:
             except OSError as e:
                 self.emit("sys", f"{self.label(fp)}: send error: {e}")
 
+    # -- file queue: files go out one after another, in the order they were added
     def send_file(self, path):
+        """Adds a file or folder to the send queue (and returns its queue item)."""
+        if not self.chans:
+            raise ConnectionError("Not connected")
+        item = {"id": next(self._qid), "path": path, "state": "queued", "cancel": threading.Event(),
+                "name": os.path.basename(path.rstrip("/\\")) or path}
+        with self._queue_lock:
+            self.send_queue.append(item)
+            if not (self._queue_worker and self._queue_worker.is_alive()):
+                self._queue_worker = threading.Thread(target=self._queue_loop, daemon=True)
+                self._queue_worker.start()
+        self.emit("queue")
+        return item
+
+    def queue_info(self):
+        with self._queue_lock:
+            return [(it["id"], it["name"], it["state"]) for it in self.send_queue]
+
+    def pause_transfers(self):
+        self.paused.set()
+        self.emit("sys", "File transfers paused")
+        self.emit("queue")
+
+    def resume_transfers(self):
+        self.paused.clear()
+        self.emit("sys", "File transfers resumed")
+        self.emit("queue")
+
+    def cancel_transfer(self, which=None):
+        """Cancels the running transfer (which=None) or a queued one by its id; 'all' cancels everything."""
+        n = 0
+        with self._queue_lock:
+            for it in self.send_queue:
+                if which == "all" or (which is None and it["state"] == "sending") or it["id"] == which:
+                    it["cancel"].set()
+                    n += 1
+        self.emit("queue")
+        return n
+
+    def set_speed_limit(self, bytes_per_sec):
+        """Upper limit for file data per peer (0 = unlimited)."""
+        self.speed_limit = max(0, int(bytes_per_sec))
+
+    def _queue_loop(self):
+        while True:
+            with self._queue_lock:
+                nxt = next((it for it in self.send_queue if it["state"] == "queued"), None)
+                if nxt is None:
+                    self.send_queue.clear()
+                    return
+                nxt["state"] = "sending"
+            self.emit("queue")
+            try:
+                if nxt["cancel"].is_set():
+                    self.emit("sys", f"Cancelled: {nxt['name']}")
+                else:
+                    self._send_item(nxt)
+            except Exception as e:
+                self.emit("sys", f"File send error: {e}")
+            with self._queue_lock:
+                nxt["state"] = "done"
+                self.send_queue.remove(nxt)
+            self.emit("queue")
+
+    def _send_item(self, item):
+        path, cancel = item["path"], item["cancel"]
         targets = list(self.chans.items())
         if not targets:
             raise ConnectionError("Not connected")
         scrub = self.scrub
+        tmp = None
+        try:
+            p = path
+            if os.path.isdir(path):
+                self.emit("sys", "Zipping folder" + (" and scrubbing metadata..." if scrub else "..."))
+                tmp = tempfile.mkdtemp(prefix="mute_zip_")
+                nm = os.path.basename(path.rstrip("/\\")) or "folder"
+                p = os.path.join(tmp, nm + ".zip")
+                skipped = make_clean_zip(path, p, scrub)
+                if scrub and skipped:
+                    exts = sorted({os.path.splitext(r)[1].lower() or "(none)" for r, _ in skipped})
+                    self.emit("sys", f"Not scrubbed: {len(skipped)} file(s) of type "
+                                     f"{', '.join(exts)} - check them for metadata")
+                elif scrub:
+                    self.emit("sys", "All files scrubbed")
+            elif scrub:
+                tmp = tempfile.mkdtemp(prefix="mute_scrub_")
+                dst = os.path.join(tmp, os.path.basename(path))
+                ok, note = scrub_file(path, dst)
+                if ok:
+                    p = dst
+                    self.emit("sys", f"Scrubbed {os.path.basename(path)}: {note}")
+                else:
+                    self.emit("sys", f"NOT scrubbed {os.path.basename(path)}: {note}")
+            size, name = os.path.getsize(p), os.path.basename(p)
+            hdr = json.dumps({"name": name, "size": size, "fid": file_id(p, name, size)}).encode()
+            multi = len(targets) > 1
 
-        def run():
-            tmp = None
-            with self.send_lock:
+            def to_peer(fp, ch):
+                # One thread per peer: each peer gets the file from its own resume point.
                 try:
-                    p = path
-                    if os.path.isdir(path):
-                        self.emit("sys", "Zipping folder" + (" and scrubbing metadata..." if scrub else "..."))
-                        tmp = tempfile.mkdtemp(prefix="mute_zip_")
-                        nm = os.path.basename(path.rstrip("/\\")) or "folder"
-                        p = os.path.join(tmp, nm + ".zip")
-                        skipped = make_clean_zip(path, p, scrub)
-                        if scrub and skipped:
-                            exts = sorted({os.path.splitext(r)[1].lower() or "(none)" for r, _ in skipped})
-                            self.emit("sys", f"Not scrubbed: {len(skipped)} file(s) of type "
-                                             f"{', '.join(exts)} - check them for metadata")
-                        elif scrub:
-                            self.emit("sys", "All files scrubbed")
-                    elif scrub:
-                        tmp = tempfile.mkdtemp(prefix="mute_scrub_")
-                        dst = os.path.join(tmp, os.path.basename(path))
-                        ok, note = scrub_file(path, dst)
-                        if ok:
-                            p = dst
-                            self.emit("sys", f"Scrubbed {os.path.basename(path)}: {note}")
-                        else:
-                            self.emit("sys", f"NOT scrubbed {os.path.basename(path)}: {note}")
-                    size, name = os.path.getsize(p), os.path.basename(p)
-                    hdr = json.dumps({"name": name, "size": size,
-                                      "fid": file_id(p, name, size)}).encode()
-                    multi = len(targets) > 1
-
-                    def to_peer(fp, ch):
-                        # One thread per peer: each peer gets the file from its own resume point.
+                    while not ch.offset_q.empty():
+                        ch.offset_q.get_nowait()
+                    ch.send(T_FILE_START, hdr)
+                    offset = None
+                    for _ in range(120):
+                        if cancel.is_set():
+                            break
                         try:
-                            while not ch.offset_q.empty():
-                                ch.offset_q.get_nowait()
-                            ch.send(T_FILE_START, hdr)
-                            offset = ch.offset_q.get(timeout=120)
-                            if not 0 <= offset <= size:
-                                raise ConnectionError("Invalid resume offset")
-                            if offset:
-                                self.emit("sys", f"{self.label(fp)}: resuming from {human(offset)}")
-                            sent, last, t0 = offset, 0, time.time()
-                            label = f"TX {self.label(fp)} {name}" if multi else f"TX {name}"
-                            with open(p, "rb") as f:
-                                f.seek(offset)
-                                while True:
-                                    b = f.read(CHUNK)
-                                    if not b:
-                                        break
-                                    ch.send(T_FILE_CHUNK, b)
-                                    sent += len(b)
-                                    now = time.time()
-                                    if now - last > 0.1:
-                                        last = now
-                                        self.emit("progress", label, sent, size,
-                                                  (sent - offset) / max(now - t0, 1e-6))
-                            ch.send(T_FILE_END)
-                            self.emit("progress", label, size, size, 0)
-                            self.emit("sys", f"Sent to {self.label(fp)}: {name} ({human(size)})")
-                        except Exception as e:
-                            self.emit("sys", f"{self.label(fp)}: transfer interrupted ({e}); "
-                                             "sending again will resume")
-
-                    ths = [threading.Thread(target=to_peer, args=t, daemon=True)
-                           for t in targets]
-                    for t in ths:
-                        t.start()
-                    for t in ths:
-                        t.join()
+                            offset = ch.offset_q.get(timeout=1)
+                            break
+                        except queue.Empty:
+                            continue
+                    if offset is None and not cancel.is_set():
+                        raise ConnectionError("Peer did not answer")
+                    if offset is not None and not 0 <= offset <= size:
+                        raise ConnectionError("Invalid resume offset")
+                    if offset:
+                        self.emit("sys", f"{self.label(fp)}: resuming from {human(offset)}")
+                    sent, last, t0 = offset or 0, 0, time.time()
+                    start = sent
+                    label = f"TX {self.label(fp)} {name}" if multi else f"TX {name}"
+                    if offset is not None and not cancel.is_set():
+                        with open(p, "rb") as f:
+                            f.seek(sent)
+                            while not cancel.is_set():
+                                if self.paused.is_set():
+                                    while self.paused.is_set() and not cancel.is_set():
+                                        self.emit("progress", label + " (paused)", sent, size, 0)
+                                        time.sleep(0.3)
+                                    start, t0 = sent, time.time()   # speed is measured from here again
+                                if cancel.is_set():
+                                    break
+                                b = f.read(CHUNK)
+                                if not b:
+                                    break
+                                ch.send(T_FILE_CHUNK, b)
+                                sent += len(b)
+                                now = time.time()
+                                lim = self.speed_limit
+                                if lim:       # keep the average at or below the limit
+                                    ahead = (sent - start) / lim - (now - t0)
+                                    if ahead > 0:
+                                        cancel.wait(min(ahead, 2.0))
+                                        now = time.time()
+                                if now - last > 0.1:
+                                    last = now
+                                    self.emit("progress", label, sent, size,
+                                              (sent - start) / max(now - t0, 1e-6))
+                    if cancel.is_set():
+                        try:
+                            ch.send(T_FILE_CANCEL)
+                        except OSError:
+                            pass
+                        self.emit("progress", label, 0, 0, 0)
+                        self.emit("sys", f"Cancelled sending {name} to {self.label(fp)}")
+                        return
+                    ch.send(T_FILE_END)
+                    self.emit("progress", label, size, size, 0)
+                    self.emit("sys", f"Sent to {self.label(fp)}: {name} ({human(size)})")
                 except Exception as e:
-                    self.emit("sys", f"File send error: {e}")
-                finally:
-                    if tmp:
-                        shutil.rmtree(tmp, ignore_errors=True)
-        threading.Thread(target=run, daemon=True).start()
+                    self.emit("sys", f"{self.label(fp)}: transfer interrupted ({e}); "
+                                     "sending again will resume")
+
+            ths = [threading.Thread(target=to_peer, args=t, daemon=True) for t in targets]
+            for t in ths:
+                t.start()
+            for t in ths:
+                t.join()
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
 
     def shutdown(self):
         for ch in list(self.chans.values()):
@@ -1518,7 +1626,12 @@ def main(args=None):
     FONT = (("Consolas" if os.name == "nt" else
              "Menlo" if sys.platform == "darwin" else "DejaVu Sans Mono"), 10)
 
-    root = tk.Tk()
+    try:                                   # optional: drag & drop of files onto the window
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:
+        DND_FILES = None
+        root = tk.Tk()
     root.title("Mute")
     root.configure(bg=BG)
     root.geometry("860x760")
@@ -1727,6 +1840,9 @@ def main(args=None):
     mk_btn(f4, "send", lambda: do_send()).pack(side="left", padx=2)
     mk_btn(f4, "file", lambda: do_file()).pack(side="left", padx=2)
     mk_btn(f4, "folder", lambda: do_folder()).pack(side="left", padx=2)
+    pause_btn = mk_btn(f4, "pause", lambda: toggle_pause(), DIM)
+    pause_btn.pack(side="left", padx=2)
+    mk_btn(f4, "cancel", lambda: node.cancel_transfer(), DIM).pack(side="left", padx=2)
     mk_btn(f4, "wipe", lambda: wipe(), ACC).pack(side="left", padx=2)
     mk_btn(f4, "PANIC", lambda: panic(), RED).pack(side="left", padx=2)
 
@@ -1953,6 +2069,16 @@ def main(args=None):
         r += 1
         row(mk_btn(win, "my onion client key...", show_client_key, DIM),
             mk_btn(win, "allowed onion clients...", edit_allowed_clients, DIM))
+        section("file transfer")
+        limit_var = tk.StringVar(value=str(node.speed_limit // 1024))
+
+        def apply_limit(*_):
+            try:
+                node.set_speed_limit(int(float(limit_var.get() or 0) * 1024))
+            except ValueError:
+                pass
+        limit_var.trace_add("write", apply_limit)
+        row(tk.Label(win, text="speed limit per peer (KB/s, 0 = unlimited)", bg=BG, fg=DIM, font=FONT), spin(limit_var))
         section("on this computer")
         row(tk.Label(win, text="auto-clear chat after (minutes, 0 = off)", bg=BG, fg=DIM, font=FONT), spin(clear_min))
         row(tk.Label(win, text="auto-lock after idle (minutes, 0 = off)", bg=BG, fg=DIM, font=FONT), spin(lock_min))
@@ -2031,6 +2157,28 @@ def main(args=None):
                 node.send_file(p)
             except Exception as e:
                 log(f"{e}", "err")
+
+    def toggle_pause():
+        if node.paused.is_set():
+            node.resume_transfers()
+            pause_btn.config(text="pause")
+        else:
+            node.pause_transfers()
+            pause_btn.config(text="resume")
+
+    def drop_files(event):
+        for p in root.tk.splitlist(event.data):
+            try:
+                node.send_file(p)
+            except Exception as e:
+                log(f"{e}", "err")
+
+    if DND_FILES:
+        try:
+            root.drop_target_register(DND_FILES)
+            root.dnd_bind("<<Drop>>", drop_files)
+        except Exception:
+            pass
 
     def do_folder():
         p = filedialog.askdirectory()
@@ -2111,6 +2259,10 @@ def main(args=None):
                         eta = f" ETA {s // 60:02d}:{s % 60:02d}"
                     prog_var.set(f"{label} [{bar}] {pct}% {human(speed)}/s{eta}" if speed
                                  else f"{label} [{bar}] {pct}%")
+                elif k == "queue":
+                    qn = len(node.queue_info())
+                    if qn > 1:
+                        log(f"{qn} files in the send queue", "sys")
                 elif k == "file":
                     log(("[+] file received: " if ev[3] else "[!] DAMAGED file: ") + ev[2],
                         "me" if ev[3] else "err")
@@ -2234,7 +2386,7 @@ def cli_main(args):
     if node.shape:
         print("[*] Constant-rate traffic:", shape_estimate(node.shape, args.tor))
     print("Commands: /send <file|folder>  /connect <host[:port]> [fp]  /peers  /name <id> <name>  /fp  /words\n"
-          "          /allow <fp>  /relay on|off  /cover on|off  /shape <frames/s|off>  /quit\n"
+          "          /allow <fp>  /relay on|off  /cover on|off  /shape <frames/s|off>  /limit <KB/s|off>\n          /queue  /pause  /resume  /cancel [id|all]  /quit\n"
           "          (other text goes to everyone)")
     try:
         for line in sys.stdin:
@@ -2289,6 +2441,24 @@ def cli_main(args):
                     print("Usage: /name <id-or-name> <new name>   (see /peers)")
             elif line == "/peers":
                 print(", ".join(f"{node.label(f)} ({short(f)})" for f in node.chans) or "(none)")
+            elif line == "/pause":
+                node.pause_transfers()
+            elif line == "/resume":
+                node.resume_transfers()
+            elif line.startswith("/cancel"):
+                arg = line[7:].strip()
+                n = node.cancel_transfer("all" if arg == "all" else int(arg) if arg.isdigit() else None)
+                print(f"[*] cancelled {n} transfer(s)")
+            elif line == "/queue":
+                q = node.queue_info()
+                print("\n".join(f"  #{i} {n} [{st}]" for i, n, st in q) or "(queue is empty)")
+            elif line.startswith("/limit "):
+                v = line[7:].strip()
+                try:
+                    node.set_speed_limit(0 if v == "off" else int(float(v) * 1024))
+                    print("[*] speed limit:", "off" if not node.speed_limit else f"{node.speed_limit // 1024} KB/s per peer")
+                except ValueError:
+                    print("[!] Usage: /limit <KB/s>  or  /limit off")
             elif line.startswith("/send "):
                 try:
                     node.send_file(line[6:].strip().strip('"'))

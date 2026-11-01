@@ -166,7 +166,7 @@ big = os.path.join(TMP, "big.dat")
 with open(big, "wb") as f:
     for _ in range(24):
         f.write(os.urandom(1 << 20))
-while F.send_lock.locked():
+while F.send_queue:
     time.sleep(0.1)
 F.send_file(big)
 
@@ -181,7 +181,7 @@ if not os.path.exists(os.path.join(m.DOWNLOAD_DIR, "big.dat")):
     for ch in list(G.chans.values()):
         ch.sock.close()  # simulate a dropped connection
     wait(lambda: not F.chans and not G.chans, 10)
-    while F.send_lock.locked():
+    while F.send_queue:
         time.sleep(0.1)
     G.connect("127.0.0.1", fport)
     ok(wait(lambda: F.chans and G.chans, 10), "reconnected after interruption")
@@ -278,7 +278,7 @@ ok(wait(lambda: events(S2, "msg")) and wait(lambda: events(S1, "msg")), "chat wo
 S2.set_shape(100)
 fpath = os.path.join(TMP, "shaped.bin")
 open(fpath, "wb").write(os.urandom(150_000))
-while S1.send_lock.locked():
+while S1.send_queue:
     time.sleep(0.1)
 S1.send_file(fpath)
 S1.send_text("chat during transfer")
@@ -389,5 +389,75 @@ ok(wait(lambda: ca._ratchets >= 2 and cb._ratchets >= 2, 10), "timer starts rene
 ca.send(m.T_MSG, b"after timer")
 ok(wait(lambda: (m.T_MSG, b"after timer") in gb), "chat still works after timer renewals")
 ca.ratchet_every = 0; ca.dead.set(); cb.dead.set()
+
+# ---- file queue, pause / resume / cancel, speed limit
+Q1, Q2 = mk("q1"), mk("q2")
+qp = m.free_port()
+Q1.listen(qp); Q2.connect("127.0.0.1", qp)
+ok(wait(lambda: Q1.chans and Q2.chans), "queue test nodes connected")
+shutil_dl = m.DOWNLOAD_DIR
+files = []
+for i, sz in enumerate((300_000, 200_000, 100_000)):
+    fpq = os.path.join(TMP, f"q{i}.bin")
+    open(fpq, "wb").write(os.urandom(sz)); files.append(fpq)
+for fpq in files:
+    Q1.send_file(fpq)
+ok(len(Q1.queue_info()) >= 2, "several files wait in the queue")
+ok(wait(lambda: all(os.path.exists(os.path.join(shutil_dl, f"q{i}.bin")) for i in range(3)), 30), "queued files all arrive")
+order = [os.path.basename(e[2]) for e in events(Q2, "file")]
+ok(order == ["q0.bin", "q1.bin", "q2.bin"], f"files arrive in the order they were queued ({order})")
+ok(all(sha(os.path.join(shutil_dl, f"q{i}.bin")) == sha(files[i]) for i in range(3)), "queued files intact")
+ok(wait(lambda: not Q1.send_queue, 5), "queue empties by itself")
+
+# speed limit
+lim = os.path.join(TMP, "lim.bin")
+open(lim, "wb").write(os.urandom(400_000))
+Q1.set_speed_limit(200_000)
+t0 = time.time()
+Q1.send_file(lim)
+ok(wait(lambda: os.path.exists(os.path.join(shutil_dl, "lim.bin")), 30), "limited transfer completes")
+el = time.time() - t0
+ok(1.6 < el < 6, f"speed limit slows 400 KB at 200 KB/s to about 2 s (took {el:.1f}s)")
+Q1.set_speed_limit(0)
+
+# pause / resume
+pz = os.path.join(TMP, "pz.bin")
+open(pz, "wb").write(os.urandom(3_000_000))
+Q1.set_speed_limit(1_000_000)
+Q1.send_file(pz)
+def partmax():
+    d = os.path.join(shutil_dl, ".partial")
+    return max([os.path.getsize(os.path.join(d, f)) for f in os.listdir(d)] or [0]) if os.path.isdir(d) else 0
+
+
+ok(wait(lambda: partmax() > 200_000, 10), "big transfer started")
+Q1.pause_transfers()
+time.sleep(0.8)
+sz1 = partmax()
+time.sleep(1.2)
+sz2 = partmax()
+ok(sz1 == sz2 and 0 < sz1 < 3_000_000, f"paused transfer sends nothing ({sz1} == {sz2})")
+ok(not os.path.exists(os.path.join(shutil_dl, "pz.bin")), "file not complete while paused")
+Q1.resume_transfers()
+ok(wait(lambda: os.path.exists(os.path.join(shutil_dl, "pz.bin")), 30), "transfer finishes after resume")
+ok(sha(os.path.join(shutil_dl, "pz.bin")) == sha(pz), "paused and resumed file intact")
+
+# cancel running + cancel queued, next file still goes through
+cx = os.path.join(TMP, "cx.bin"); open(cx, "wb").write(os.urandom(3_000_000))
+after = os.path.join(TMP, "after.bin"); open(after, "wb").write(os.urandom(50_000))
+gone = os.path.join(TMP, "gone.bin"); open(gone, "wb").write(os.urandom(50_000))
+Q1.set_speed_limit(1_000_000)
+Q1.send_file(cx); it_gone = Q1.send_file(gone); Q1.send_file(after)
+ok(wait(lambda: any(e[0] == "progress" and "cx.bin" in str(e[1]) for e in list(Q1.events.queue)), 10), "cancel test: transfer running")
+Q1.cancel_transfer(it_gone["id"])
+Q1.cancel_transfer()
+Q1.set_speed_limit(0)
+ok(wait(lambda: os.path.exists(os.path.join(shutil_dl, "after.bin")), 30), "next file still arrives after a cancel")
+ok(not os.path.exists(os.path.join(shutil_dl, "cx.bin")), "cancelled file was not delivered")
+ok(not os.path.exists(os.path.join(shutil_dl, "gone.bin")), "file cancelled in the queue was never sent")
+ok(wait(lambda: not os.path.isdir(os.path.join(shutil_dl, ".partial")) or not os.listdir(os.path.join(shutil_dl, ".partial")), 5),
+   "receiver deleted the partial file after the cancel")
+ok(wait(lambda: not Q1.send_queue, 5), "queue empty after cancels")
+Q1.shutdown(); Q2.shutdown()
 
 print("all loopback tests passed")

@@ -139,10 +139,17 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--persistent` | GUI: skip the burner/persistent question |
 
 Commands inside: `/send <file|folder>`, `/connect <host[:port]> [fp]`, `/peers`, `/name <id-or-name> <new name>`,
-`/fp`, `/words`, `/allow <fp>`, `/relay on|off`, `/cover on|off`, `/shape <rate|off>`, `/quit`; any other text is sent to everyone.
+`/fp`, `/words`, `/allow <fp>`, `/relay on|off`, `/cover on|off`, `/shape <rate|off>`, `/queue`, `/pause`, `/resume`, `/cancel [id|all]`, `/limit <KB/s|off>`, `/quit`; any other text is sent to everyone.
 
 In the GUI the same settings are under **Options...** (closed mode, allowlist, shared secret, relay, cover traffic, onion client keys,
 auto-clear, auto-lock, clipboard, notifications, screenshot block on Windows).
+
+## Sending files comfortably
+
+Files and folders go into a **send queue** and are sent one after another in the order you added them. You can **pause / resume** and **cancel** the
+running transfer (the receiver deletes the unfinished part), cancel files that are still waiting, and set a **speed limit** per peer
+(Options > file transfer, or `/limit 500` for 500 KB/s). Interrupted transfers still resume from where they stopped. In the GUI you can also
+**drag and drop** files or folders onto the window (uses the optional `tkinterdnd2` package; without it the buttons work as before).
 
 ## Constant-rate traffic
 
