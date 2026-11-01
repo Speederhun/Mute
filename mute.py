@@ -2655,6 +2655,7 @@ def main(args=None):
                     node.emit("addr", node.onion + f":{DEFAULT_PORT}")
                 else:
                     node.listen(port)
+                node.emit("listening")
                 if node.stop_requested.is_set():
                     node.stop()            # STOP was pressed while we were still starting
                     return
@@ -2799,9 +2800,13 @@ def main(args=None):
                     stop_btn.config(state="normal")
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans))
                     notify()
+                elif k == "listening":
+                    if not node.chans:
+                        status_var.set("listening · waiting for a peer")
                 elif k == "disconnected":
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans)
-                                   if node.chans else "offline")
+                                   if node.chans else
+                                   ("listening · waiting for a peer" if node.server else "offline"))
                 elif k == "addr":
                     addr_var.set(ev[1])
                 elif k == "enable_start":
