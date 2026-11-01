@@ -61,6 +61,12 @@ ok(m.normalize_fp(fp.upper().replace(" ", "-")) == fp, "normalize_fp accepts any
 w = m.fp_words(fp)
 ok(len(w.split()) == 6 and w == m.fp_words(fp) and w != m.fp_words(B.my_fp), "fp_words deterministic and distinct")
 
+# ---- address cleanup
+onion = "trzqozoye4bwb2rtf7bq4b52elqrcacr73u5jub4zhtqytb2u2brx5ad"
+ok(m.clean_host(onion) == onion + ".onion", "bare 56-char onion name gets .onion appended")
+ok(m.clean_host("  HTTP://" + onion.upper() + ".onion/ ") == onion + ".onion", "scheme, case, slashes and spaces are cleaned")
+ok(m.clean_host("192.168.1.5") == "192.168.1.5" and m.clean_host("example.org") == "example.org", "normal hosts are left alone")
+
 # ---- wrong expected fingerprint is rejected
 C = mk("c")
 C.connect("127.0.0.1", port, "0000 0000 0000 0000 0000 0000 0000 0000")

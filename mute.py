@@ -900,6 +900,8 @@ class Node:
                              daemon=True).start()
 
     def connect(self, host, port, expected_fp=None):
+        host = clean_host(host)
+
         def run():
             try:
                 self.emit("sys", f"Connecting to {host}:{port}...")
@@ -913,7 +915,15 @@ class Node:
                 else:
                     c = socket.create_connection((host, port), timeout=10)
             except Exception as e:
-                self.emit("sys", f"Could not connect: {e}")
+                hint = ""
+                if self.transport == "tor":
+                    if not host.endswith(".onion") and not re.fullmatch(r"[\d.]+", host):
+                        hint = " (in TOR mode the address should end in .onion)"
+                    else:
+                        hint = (" - the other side must be running (START pressed, Tor bootstrapped, "
+                                "app still open) and the address must be copied completely."
+                                " A just-started onion service can need a minute to become reachable.")
+                self.emit("sys", f"Could not connect: {e}{hint}")
                 return
             self._session(c, True, expected_fp)
         threading.Thread(target=run, daemon=True).start()
@@ -1175,6 +1185,19 @@ BANNER = r"""
 |_|  |_|\___/  |_| |_____|
  end-to-end · no server · no logs
 """
+
+
+def clean_host(host):
+    """Tidies a pasted address: strips spaces, a scheme and slashes, lower-cases it and adds the
+    missing '.onion' to a bare 56-character v3 onion name."""
+    host = host.strip().lower()
+    for prefix in ("http://", "https://", "tor://"):
+        if host.startswith(prefix):
+            host = host[len(prefix):]
+    host = host.strip("/ ")
+    if re.fullmatch(r"[a-z2-7]{56}", host):
+        host += ".onion"
+    return host
 
 
 def split_hostport(text, default=DEFAULT_PORT):
