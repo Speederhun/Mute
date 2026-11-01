@@ -37,6 +37,12 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 - **Hygiene options**: clipboard auto-clear after 30 s, notifications without message content, screenshot/recording block on Windows.
 - Runs on **Windows, Linux and macOS** from one Python file (`mute.py`).
 
+## Download
+
+Each platform has its **own release** on the [Releases page](../../releases): `windows-vX.Y.Z`, `linux-vX.Y.Z`, `macos-vX.Y.Z`.
+Every release contains the binaries for that system, an installer pack (installs Python/Tor if needed) and SHA-256 checksums.
+They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`).
+
 ## Install
 
 Pick your platform - each folder has its own guide and build script:

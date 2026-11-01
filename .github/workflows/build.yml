@@ -1,7 +1,8 @@
 name: build
 
-# Separate build for every platform: Mute-windows, Mute-linux, Mute-macos.
-# Push a tag like v1.0.0 to attach all three to a GitHub release.
+# Separate build and separate GitHub release for every platform.
+# Push a tag like v1.1.0 and three releases are created:
+#   windows-v1.1.0, linux-v1.1.0, macos-v1.1.0  (each with its own binaries, installer pack and checksums)
 on:
   push:
     branches: [main]
@@ -64,12 +65,16 @@ jobs:
           OPTS="--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise"
           python -m PyInstaller $OPTS --windowed --name Mute mute.py
           python -m PyInstaller $OPTS --name Mute-cli mute.py
+      - name: Installer pack (no git needed - installs Python and Tor if missing)
+        shell: bash
+        run: git archive --format=zip --prefix=Mute/ -o dist/Mute-windows-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md windows
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-windows
           path: |
             dist/Mute.exe
             dist/Mute-cli.exe
+            dist/Mute-windows-installer.zip
 
   linux:
     needs: test
@@ -89,10 +94,14 @@ jobs:
             --collect-submodules noise mute.py
           chmod +x dist/Mute
           tar -C dist -czf dist/Mute-linux.tar.gz Mute
+      - name: Installer pack (installs only missing packages, never upgrades the system)
+        run: git archive --format=tar.gz --prefix=Mute/ -o dist/Mute-linux-installer.tar.gz HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md linux
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-linux
-          path: dist/Mute-linux.tar.gz
+          path: |
+            dist/Mute-linux.tar.gz
+            dist/Mute-linux-installer.tar.gz
 
   macos:
     needs: test
@@ -110,22 +119,88 @@ jobs:
             --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
             --collect-submodules noise mute.py
           ditto -c -k --sequesterRsrc --keepParent dist/Mute.app dist/Mute-macos.zip
+      - name: Installer pack (Homebrew based)
+        run: git archive --format=zip --prefix=Mute/ -o dist/Mute-macos-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md macos
       - uses: actions/upload-artifact@v4
         with:
           name: Mute-macos
-          path: dist/Mute-macos.zip
+          path: |
+            dist/Mute-macos.zip
+            dist/Mute-macos-installer.zip
 
-  release:
+  release-windows:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, macos]
+    needs: windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: Mute-windows
           path: artifacts
-          merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS-windows.txt && cat SHA256SUMS-windows.txt
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: windows-${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Mute ${{ github.ref_name }} for Windows
+          generate_release_notes: true
+          body: |
+            **Windows build.** `Mute.exe` (GUI) and `Mute-cli.exe` need no Python.
+            `Mute-windows-installer.zip`: unzip and double-click `windows\install.bat` - it installs Python and Tor if missing and adds a desktop shortcut.
+            The executables are unsigned, so Windows SmartScreen may warn; compare the SHA-256 in `SHA256SUMS-windows.txt`.
+            Not audited, see SECURITY.md.
+          files: artifacts/*
+
+  release-linux:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mute-linux
+          path: artifacts
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: linux-${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Mute ${{ github.ref_name }} for Linux
+          generate_release_notes: true
+          body: |
+            **Linux build** (built on Ubuntu 22.04, runs on most distributions with a similar or newer glibc).
+            `Mute-linux.tar.gz`: single binary (needs Tkinter for the GUI; `tor` for Tor mode).
+            `Mute-linux-installer.tar.gz`: extract and run `bash linux/install.sh` - installs only missing packages (Arch, Debian/Ubuntu/Kali, Fedora, openSUSE), never upgrades the system.
+            Compare the SHA-256 in `SHA256SUMS-linux.txt`. Not audited, see SECURITY.md.
+          files: artifacts/*
+
+  release-macos:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mute-macos
+          path: artifacts
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS-macos.txt && cat SHA256SUMS-macos.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: macos-${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          name: Mute ${{ github.ref_name }} for macOS
+          generate_release_notes: true
+          body: |
+            **macOS build.** `Mute-macos.zip` contains the unsigned `Mute.app` (first start: right-click > Open, or `xattr -dr com.apple.quarantine Mute.app`).
+            `Mute-macos-installer.zip`: unzip and run `bash macos/install.sh` - uses Homebrew for Python and Tor.
+            Compare the SHA-256 in `SHA256SUMS-macos.txt`. Not audited, see SECURITY.md.
           files: artifacts/*
