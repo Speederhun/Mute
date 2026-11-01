@@ -41,7 +41,8 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 
 Each platform has its **own release** on the [Releases page](../../releases): `windows-vX.Y.Z`, `linux-vX.Y.Z`, `macos-vX.Y.Z`.
 Every release contains the binaries for that system, an installer pack (installs Python/Tor if needed) and SHA-256 checksums.
-They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`).
+They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.1.0 && git push origin v1.1.0`), or manually:
+**Actions > build > Run workflow**, enter a version such as `v1.1.0`.
 
 ## Install
 

@@ -1,7 +1,7 @@
 name: build
 
 # Separate build and separate GitHub release for every platform.
-# Push a tag like v1.1.0 and three releases are created:
+# Push a tag like v1.1.0 (or run this workflow manually with a version) and three releases are created:
 #   windows-v1.1.0, linux-v1.1.0, macos-v1.1.0  (each with its own binaries, installer pack and checksums)
 on:
   push:
@@ -9,6 +9,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Publish releases for this version (e.g. v1.1.0). Leave empty to only build."
+        required: false
+        default: ""
 
 jobs:
   test:
@@ -129,7 +134,7 @@ jobs:
             dist/Mute-macos-installer.zip
 
   release-windows:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: windows
     runs-on: ubuntu-latest
     permissions:
@@ -143,9 +148,9 @@ jobs:
         run: cd artifacts && sha256sum * > SHA256SUMS-windows.txt && cat SHA256SUMS-windows.txt
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: windows-${{ github.ref_name }}
+          tag_name: windows-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
-          name: Mute ${{ github.ref_name }} for Windows
+          name: Mute ${{ inputs.version || github.ref_name }} for Windows
           generate_release_notes: true
           body: |
             **Windows build.** `Mute.exe` (GUI) and `Mute-cli.exe` need no Python.
@@ -155,7 +160,7 @@ jobs:
           files: artifacts/*
 
   release-linux:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: linux
     runs-on: ubuntu-latest
     permissions:
@@ -169,9 +174,9 @@ jobs:
         run: cd artifacts && sha256sum * > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: linux-${{ github.ref_name }}
+          tag_name: linux-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
-          name: Mute ${{ github.ref_name }} for Linux
+          name: Mute ${{ inputs.version || github.ref_name }} for Linux
           generate_release_notes: true
           body: |
             **Linux build** (built on Ubuntu 22.04, runs on most distributions with a similar or newer glibc).
@@ -181,7 +186,7 @@ jobs:
           files: artifacts/*
 
   release-macos:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: macos
     runs-on: ubuntu-latest
     permissions:
@@ -195,9 +200,9 @@ jobs:
         run: cd artifacts && sha256sum * > SHA256SUMS-macos.txt && cat SHA256SUMS-macos.txt
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: macos-${{ github.ref_name }}
+          tag_name: macos-${{ inputs.version || github.ref_name }}
           target_commitish: ${{ github.sha }}
-          name: Mute ${{ github.ref_name }} for macOS
+          name: Mute ${{ inputs.version || github.ref_name }} for macOS
           generate_release_notes: true
           body: |
             **macOS build.** `Mute-macos.zip` contains the unsigned `Mute.app` (first start: right-click > Open, or `xattr -dr com.apple.quarantine Mute.app`).
