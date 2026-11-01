@@ -170,4 +170,36 @@ for _ in range(100):
     b2.close(); b3.close()
 ok(bad == 0, "random frames are never accepted on an established channel")
 
+# ---- malicious fragments on an established channel
+def frag_attack(build):
+    a, b, ca, cb = pair()
+
+    def sender():
+        try:
+            for fr in build():
+                ca._send_raw(*fr)
+        except OSError:
+            pass
+    threading.Thread(target=sender, daemon=True).start()
+    try:
+        cb.sock.settimeout(8)
+        for _ in range(5000):
+            cb.recv()
+        return False
+    except ConnectionError:
+        return True      # the channel itself rejected it (a timeout would NOT count)
+    finally:
+        a.close(); b.close()
+
+
+H = m.FRAG_HDR
+ok(frag_attack(lambda: [(m.T_FRAG, b"\x01")]), "too-short fragment header is rejected")
+ok(frag_attack(lambda: [(m.T_FRAG, struct.pack(H, m.T_FRAG, 1, 1) + b"x")]), "fragment that claims to be a fragment is rejected")
+ok(frag_attack(lambda: [(m.T_FRAG, struct.pack(H, m.T_MSG, 0, 7) + b"a" * m.FRAG_DATA)] * (m.MAX_ASSEMBLED // m.FRAG_DATA + 4)),
+   "endless fragmented message is cut off at the size limit")
+ok(frag_attack(lambda: [(m.T_FRAG, struct.pack(H, m.T_MSG, 0, i) + b"a") for i in range(80)]),
+   "too many half-finished messages are rejected")
+ok(frag_attack(lambda: [(m.T_FRAG, struct.pack(H, m.T_MSG, 0, 3) + b"a"), (m.T_FRAG, struct.pack(H, m.T_FILE_CHUNK, 1, 3) + b"b")]),
+   "fragments that change type mid-message are rejected")
+
 print("all fuzz tests passed")

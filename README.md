@@ -31,6 +31,8 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
   (Noise `XXpsk3`, stops man-in-the-middle even if the fingerprint check is skipped), **onion client authorization**
   (without your key nobody can even find your onion service).
 - **Easy verification**: besides the hex fingerprint every identity has **6 pronounceable words** to read aloud over the phone.
+- **Constant-rate traffic** (optional): every frame is the same size and goes out on a fixed clock, with dummy frames in the gaps, so an
+  observer cannot see *when* you talk or *how much*. Costs bandwidth and limits speed - see the table below.
 - **Group chat extras**: optional **relay hub** (one person forwards messages between peers who are not connected to each other)
   and **cover traffic** (random dummy frames so idle and active periods look alike).
 - **Passphrase-protected identity key** (scrypt + ChaCha20-Poly1305); the list of known peers is encrypted with the same passphrase.
@@ -116,6 +118,7 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--psk` | both sides enter the same secret before connecting |
 | `--relay` | forward chat messages between your peers (hub) |
 | `--cover` | send dummy traffic at random intervals |
+| `--shape RATE` | constant-rate traffic, `RATE` frames per second (e.g. `0.2` low, `1` normal, `4` high); also `/shape` inside the chat |
 | `--client-auth` | create an onion client key (memory only) and print the public part |
 | `--allow-client KEY` | only holders of these onion client keys can reach your onion service |
 | `--fp FP` | expected fingerprint of the peer you connect to |
@@ -123,10 +126,31 @@ mute --listen --psk                       # ask for a shared secret (hidden inpu
 | `--persistent` | GUI: skip the burner/persistent question |
 
 Commands inside: `/send <file|folder>`, `/connect <host[:port]> [fp]`, `/peers`, `/name <id-or-name> <new name>`,
-`/fp`, `/words`, `/allow <fp>`, `/relay on|off`, `/cover on|off`, `/quit`; any other text is sent to everyone.
+`/fp`, `/words`, `/allow <fp>`, `/relay on|off`, `/cover on|off`, `/shape <rate|off>`, `/quit`; any other text is sent to everyone.
 
 In the GUI the same settings are under **Options...** (closed mode, allowlist, shared secret, relay, cover traffic, onion client keys,
 auto-clear, auto-lock, clipboard, notifications, screenshot block on Windows).
+
+## Constant-rate traffic
+
+Without it, an observer on the network (your provider, a Wi-Fi owner) can see *when* you write and roughly *how much*, even through Tor.
+With **Options > constant-rate traffic** (or `--shape`) Mute sends **one fixed-size 1 KB frame every 1/rate seconds, always**. Real data goes
+into those frames; when you are silent, dummy frames take their place. Messages and files are split into frames and reassembled.
+
+| Setting | Frames/s | Traffic per direction (via Tor) | Per day | Per month | Speed limit |
+|---------|---------:|-------------------------------:|--------:|----------:|------------:|
+| low | 0.2 | 0.3 KB/s | 26 MB | 0.8 GB | ~0.2 KB/s |
+| normal | 1 | 1.5 KB/s | 130 MB | 3.9 GB | ~1 KB/s |
+| high | 4 | 6 KB/s | 520 MB | 15.6 GB | ~4 KB/s |
+| fast | 20 | 30 KB/s | 2.6 GB | 78 GB | ~20 KB/s |
+
+- Figures are per direction **and per peer** (double them for the total up + down, multiply by the number of peers). In DIRECT mode a frame is
+  ~1.05 KB instead of ~1.5 KB on the wire. The Options window shows the estimate for your choice.
+- **Speed**: the rate is also the ceiling. At *normal* chat is instant enough (a message waits up to one second), but a 1 MB file takes ~17 minutes.
+  Pick *fast* for files, or switch it off for a big transfer.
+- Each side decides for **its own** sending direction; the other side understands the frames either way. A peer running an older Mute that does not
+  know this frame type will drop the connection when you enable it.
+- It hides timing and volume from simple observers. It is **not** a guarantee against an adversary who sees both ends and correlates traffic.
 
 ## Metadata scrubbing
 
@@ -152,7 +176,7 @@ In TOR mode also your IP address and who talks to whom. Closed mode and onion cl
 
 **Does not protect against**:
 - a compromised device or keylogger, or skipping the fingerprint check (use words/fingerprint, a shared secret, or closed mode);
-- traffic-timing analysis by a strong adversary - **cover traffic helps only against simple observers**, it is not a guarantee;
+- traffic-timing analysis by a strong adversary - **cover traffic and constant-rate mode help only against simple observers**, they are not a guarantee;
 - metadata in DIRECT mode (IP addresses and traffic volume are visible);
 - **a malicious relay hub**: in relay mode the hub operator can drop, delay or **forge** relayed messages (the origin shown for
   a relayed message is the hub's claim, not a cryptographic proof). Use it only with a hub you trust, or connect to everyone directly;
@@ -167,7 +191,7 @@ Adding one would be a protocol change; use a vetted implementation rather than h
 (framing, file transfer, fingerprints, relay, scrubbing) has had no independent review. Get one before relying on it for high-risk use.
 See [SECURITY.md](SECURITY.md) for reporting problems.
 
-**Tested automatically** (CI on Windows, Linux and macOS): loopback connections, messages, resumable large transfers,
+**Tested automatically** (CI on Windows, Linux and macOS): loopback connections, constant-rate framing (equal frame sizes, fixed clock, reassembly, malicious fragments), messages, resumable large transfers,
 shared secrets, closed mode, burner identities, encrypted known-peers file, relay and cover frames, tampered/replayed/reordered
 frames, garbage handshakes, and fuzzed scrubbers and parsers. **Not tested on real systems**: Tor bootstrap and onion
 services end to end, bridges, the Windows screenshot block, and the Windows/macOS/Arch/Kali packaging - see the status notes in each platform guide.

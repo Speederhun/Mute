@@ -56,7 +56,7 @@ REKEY_EVERY = 512            # ratchet the key every N frames
 MAX_FRAME = 65535 + 64
 
 T_MSG, T_FILE_START, T_FILE_CHUNK, T_FILE_END, T_FILE_OFFSET = 1, 2, 3, 4, 5
-T_RELAY, T_COVER = 6, 7
+T_RELAY, T_COVER, T_FRAG = 6, 7, 8
 
 _BAD = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -282,6 +282,22 @@ def handshake(sock, ident, initiator, psk=None):
     return rs, c
 
 
+FRAG_HDR = ">BBH"                      # original type, flags (1 = last fragment), message id
+FRAG_DATA = PAD - 5 - struct.calcsize(FRAG_HDR)   # payload bytes per constant-size frame
+MAX_ASSEMBLED = 2 * 1024 * 1024        # largest message accepted from fragments
+SHAPE_QUEUE = 16                       # frames waiting for their time slot (keeps chat responsive)
+
+
+def shape_estimate(rate, tor=True):
+    """Human-readable traffic estimate for constant-rate mode (per direction, per peer)."""
+    if rate <= 0:
+        return "off"
+    per_frame = 1.5 if tor else 1.05   # KB on the wire (Tor splits frames into 514-byte cells)
+    kbs = rate * per_frame
+    month_gb = kbs * 3600 * 24 * 30 / 1e6
+    return f"{kbs:.1f} KB/s per direction, about {month_gb:.1f} GB per month per peer"
+
+
 class Channel:
     def __init__(self, sock, noise):
         self.sock = sock
@@ -289,8 +305,16 @@ class Channel:
         self.sn = self.rn = 0
         self.lock = threading.Lock()
         self.offset_q = queue.Queue()
+        self.rate = 0.0                # constant-rate mode: frames per second (0 = off)
+        self.dead = threading.Event()
+        self._q = None
+        self._shaper = None
+        self._mid = 0
+        self._mid_lock = threading.Lock()
+        self._asm = {}                 # message id -> [type, bytearray]
 
-    def send(self, typ, payload=b""):
+    # -- raw frame
+    def _send_raw(self, typ, payload=b""):
         body = struct.pack(">BI", typ, len(payload)) + payload
         body += b"\0" * ((-len(body)) % PAD)  # length hiding: 1 KB units
         with self.lock:
@@ -300,7 +324,65 @@ class Channel:
                 self.noise.rekey_outbound_cipher()  # old key is erased
             self.sock.sendall(struct.pack(">I", len(ct)) + ct)
 
-    def recv(self):
+    # -- constant-rate mode: every frame is exactly one 1 KB unit, sent on a fixed clock;
+    #    when there is nothing to say a dummy frame goes out instead
+    def set_rate(self, rate):
+        rate = max(0.0, float(rate))
+        self.rate = rate
+        if rate > 0 and not (self._shaper and self._shaper.is_alive()):
+            self._q = queue.Queue(maxsize=SHAPE_QUEUE)
+            self._shaper = threading.Thread(target=self._shape_loop, daemon=True)
+            self._shaper.start()
+
+    def _shape_loop(self):
+        nxt = time.monotonic()
+        try:
+            while self.rate > 0 and not self.dead.is_set():
+                nxt += 1.0 / self.rate
+                try:
+                    typ, payload = self._q.get_nowait()
+                except queue.Empty:
+                    typ, payload = T_COVER, b""
+                self._send_raw(typ, payload)
+                self.dead.wait(max(0.0, nxt - time.monotonic()))
+        except OSError:
+            self.dead.set()
+            return
+        # rate switched off: flush what is still queued
+        try:
+            while True:
+                typ, payload = self._q.get_nowait()
+                self._send_raw(typ, payload)
+        except (queue.Empty, OSError):
+            pass
+
+    def send(self, typ, payload=b""):
+        if self.rate <= 0:
+            return self._send_raw(typ, payload)
+        with self._mid_lock:
+            self._mid = (self._mid + 1) & 0xFFFF
+            mid = self._mid
+        n = max(1, -(-len(payload) // FRAG_DATA))
+        for k in range(n):
+            part = payload[k * FRAG_DATA:(k + 1) * FRAG_DATA]
+            frame = (T_FRAG, struct.pack(FRAG_HDR, typ, 1 if k == n - 1 else 0, mid) + part)
+            while True:
+                if self.dead.is_set():
+                    raise ConnectionError("Connection closed")
+                try:
+                    self._q.put(frame, timeout=1)
+                    break
+                except queue.Full:
+                    continue
+
+    def close(self):
+        self.dead.set()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _recv_frame(self):
         (n,) = struct.unpack(">I", recv_exact(self.sock, 4))
         if n > MAX_FRAME or n < 16 + 5:
             raise ConnectionError("Invalid frame")
@@ -312,6 +394,27 @@ class Channel:
         if 5 + ln > len(pt):
             raise ConnectionError("Invalid length")
         return typ, pt[5:5 + ln]
+
+    def recv(self):
+        while True:
+            typ, data = self._recv_frame()
+            if typ != T_FRAG:
+                return typ, data
+            hdr = struct.calcsize(FRAG_HDR)
+            if len(data) < hdr:
+                raise ConnectionError("Invalid fragment")
+            otyp, flags, mid = struct.unpack(FRAG_HDR, data[:hdr])
+            if otyp == T_FRAG:
+                raise ConnectionError("Invalid fragment")
+            entry = self._asm.setdefault(mid, [otyp, bytearray()])
+            if entry[0] != otyp:
+                raise ConnectionError("Inconsistent fragment")
+            entry[1] += data[hdr:]
+            if len(entry[1]) > MAX_ASSEMBLED or len(self._asm) > 64:
+                raise ConnectionError("Fragmented message too large")
+            if flags & 1:
+                del self._asm[mid]
+                return otyp, bytes(entry[1])
 
 
 # ---------------------------------------------------------------- metadata scrubbing
@@ -664,6 +767,7 @@ class Node:
         self.psk = None           # optional pre-shared secret (32 bytes, memory only)
         self.relay = False        # hub mode: forward chat messages between your peers
         self.cover = False        # send dummy frames to hide when you are idle/active
+        self.shape = 0.0          # constant-rate mode: frames per second per peer (0 = off)
         self._cover_thread = None
         self.client_auth = None   # (private b64, public b32) for onion client authorization
         self.allowed_clients = [] # onion client public keys allowed to reach your service
@@ -752,10 +856,20 @@ class Node:
         while self.cover:
             time.sleep(rnd.uniform(2, 9))
             for ch in list(self.chans.values()):
+                if ch.rate > 0:
+                    continue  # constant-rate mode already fills the silence
                 try:
                     ch.send(T_COVER, os.urandom(rnd.choice([0, 200, 700, 1500])))
                 except OSError:
                     pass
+
+    def set_shape(self, rate):
+        """Constant-rate traffic: every frame is 1 KB and goes out on a fixed clock (dummy frames fill
+        the gaps), so an observer cannot see when you talk or how much. 0 turns it off.
+        Costs bandwidth and limits throughput to about rate KB/s - see shape_estimate()."""
+        self.shape = max(0.0, float(rate))
+        for ch in list(self.chans.values()):
+            ch.set_rate(self.shape)
 
     def _forward(self, origin, text):
         payload = json.dumps({"o": origin, "t": text}).encode()
@@ -986,6 +1100,7 @@ class Node:
                     raise ConnectionError("Already connected to this peer")
                 sock.settimeout(None)
                 chan = Channel(sock, noise)
+                chan.set_rate(self.shape)
                 self.chans[fp] = chan
         except Exception as e:
             self.emit("sys", f"Connection failed: {e}")
@@ -1077,7 +1192,7 @@ class Node:
                 if self.chans.get(fp) is chan:
                     del self.chans[fp]
             try:
-                chan.sock.close()
+                chan.close()
             except OSError:
                 pass
             self.emit("disconnected", fp)
@@ -1178,10 +1293,7 @@ class Node:
 
     def shutdown(self):
         for ch in list(self.chans.values()):
-            try:
-                ch.sock.close()
-            except OSError:
-                pass
+            ch.close()
         if self.server:
             try:
                 self.server.close()
@@ -1264,6 +1376,9 @@ def build_parser():
     g.add_argument("--amnesia", action="store_true", help="save nothing")
     g.add_argument("--no-scrub", action="store_true", help="do not scrub metadata from sent files")
     g.add_argument("--cover", action="store_true", help="send dummy traffic at random intervals")
+    g.add_argument("--shape", type=float, default=0.0, metavar="FRAMES_PER_SEC",
+                   help="constant-rate traffic: one 1 KB frame every 1/RATE s, dummy frames fill the gaps "
+                        "(e.g. 0.2 low, 1 normal, 4 high). Hides when you talk; costs bandwidth, limits speed")
     g = ap.add_argument_group("access control")
     g.add_argument("--closed", action="store_true", help="only allowlisted fingerprints may connect")
     g.add_argument("--allow", action="append", default=[], metavar="FP",
@@ -1286,6 +1401,12 @@ def apply_opts(node, args, secret=None):
         node.set_psk(secret)
     if args.cover:
         node.set_cover(True)
+    if args.shape and args.shape > 0:
+        node.set_shape(args.shape)
+
+
+SHAPE_LABELS = [("off", 0.0), ("low  (1 frame / 5 s)", 0.2), ("normal (1 frame / s)", 1.0),
+                ("high (4 frames / s)", 4.0), ("fast (20 frames / s)", 20.0)]
 
 
 def main(args=None):
@@ -1345,6 +1466,7 @@ def main(args=None):
     closed_var = tk.BooleanVar(value=args.closed)
     relay_var = tk.BooleanVar(value=args.relay)
     cover_var = tk.BooleanVar(value=args.cover)
+    shape_var = tk.StringVar(value=SHAPE_LABELS[0][0])
     notify_var = tk.BooleanVar(value=True)
     clip_var = tk.BooleanVar(value=True)
     shot_var = tk.BooleanVar(value=False)
@@ -1354,6 +1476,8 @@ def main(args=None):
     locked = [False]
     last_active = [time.time()]
 
+    if args.shape:
+        shape_var.set(min(SHAPE_LABELS, key=lambda lr: abs(lr[1] - args.shape))[0])
     secret = None
     if args.psk:
         secret = simpledialog.askstring("Shared secret", "Pre-shared secret (both sides must enter the same):",
@@ -1713,6 +1837,20 @@ def main(args=None):
         section("network privacy")
         row(mk_check(win, "cover traffic (random dummy frames)", cover_var,
                      lambda: node.set_cover(cover_var.get())))
+        est_var = tk.StringVar(value=shape_estimate(node.shape, node.transport == "tor") if node.shape else "")
+
+        def apply_shape(*_):
+            rate = dict(SHAPE_LABELS).get(shape_var.get(), 0.0)
+            node.set_shape(rate)
+            est_var.set(shape_estimate(rate, node.transport == "tor") if rate else "")
+            log("Constant-rate traffic: " + (shape_estimate(rate, node.transport == "tor") if rate else "off"))
+        om = tk.OptionMenu(win, shape_var, *[l for l, _ in SHAPE_LABELS], command=apply_shape)
+        om.config(bg="#001a00", fg=FG, activebackground=FG, activeforeground="#000", font=FONT,
+                  relief="flat", highlightthickness=1, highlightbackground=DIM)
+        row(tk.Label(win, text="constant-rate traffic (hides when you talk)", bg=BG, fg=DIM, font=FONT), om)
+        tk.Label(win, textvariable=est_var, bg=BG, fg=ACC, font=FONT, anchor="w").grid(
+            row=r, column=0, columnspan=3, sticky="w", padx=8)
+        r += 1
         row(mk_btn(win, "my onion client key...", show_client_key, DIM),
             mk_btn(win, "allowed onion clients...", edit_allowed_clients, DIM))
         section("on this computer")
@@ -1993,8 +2131,11 @@ def cli_main(args):
         node.shutdown()
         return
 
+    if node.shape:
+        print("[*] Constant-rate traffic:", shape_estimate(node.shape, args.tor))
     print("Commands: /send <file|folder>  /connect <host[:port]> [fp]  /peers  /name <id> <name>  /fp  /words\n"
-          "          /allow <fp>  /relay on|off  /cover on|off  /quit      (other text goes to everyone)")
+          "          /allow <fp>  /relay on|off  /cover on|off  /shape <frames/s|off>  /quit\n"
+          "          (other text goes to everyone)")
     try:
         for line in sys.stdin:
             line = line.rstrip("\n")
@@ -2020,6 +2161,17 @@ def cli_main(args):
                 else:
                     node.set_cover(on)
                 print(f"[*] {cmd[1:]} {'on' if on else 'off'}")
+            elif line.startswith("/shape "):
+                val = line[7:].strip().lower()
+                try:
+                    rate = 0.0 if val in ("off", "0", "no") else float(val)
+                    if rate < 0 or rate > 200:
+                        raise ValueError
+                except ValueError:
+                    print("[!] Usage: /shape <frames per second, e.g. 0.2 | 1 | 4>  or  /shape off")
+                else:
+                    node.set_shape(rate)
+                    print("[*] constant-rate traffic:", shape_estimate(rate, node.transport == "tor"))
             elif line.startswith("/connect "):
                 parts = line.split()
                 try:

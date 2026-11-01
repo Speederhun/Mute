@@ -191,4 +191,100 @@ if not os.path.exists(os.path.join(m.DOWNLOAD_DIR, "big.dat")):
 ok(sha(os.path.join(m.DOWNLOAD_DIR, "big.dat")) == sha(big), "resumed file hash equal")
 F.shutdown(); G.shutdown()
 
+# ---- constant-rate traffic (shaping)
+import socket as _socket
+import struct as _struct
+import threading as _th
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey as _K
+
+
+def chan_pair():
+    a, b = _socket.socketpair()
+    out = {}
+    th = _th.Thread(target=lambda: out.update(r=m.handshake(b, _K.generate(), False)))
+    th.start()
+    ra = m.handshake(a, _K.generate(), True)
+    th.join()
+    return a, b, m.Channel(a, ra[1]), m.Channel(b, out["r"][1])
+
+
+# wire view: all frames the same size, on a fixed clock, dummy frames in the silence
+a, b, ca, cb = chan_pair()
+ca.set_rate(50)
+_th.Thread(target=lambda: (ca.send(m.T_MSG, b"hi"), ca.send(m.T_FILE_CHUNK, os.urandom(60000))), daemon=True).start()
+b.settimeout(10)
+sizes, times = [], []
+t_end = time.monotonic() + 2.0
+while time.monotonic() < t_end:
+    (n,) = _struct.unpack(">I", m.recv_exact(b, 4))
+    m.recv_exact(b, n)
+    sizes.append(n)
+    times.append(time.monotonic())
+ca.close()
+gaps = sorted(y - x for x, y in zip(times, times[1:]))
+med = gaps[len(gaps) // 2]
+ok(len(set(sizes)) == 1 and sizes[0] == 1024 + 16, "constant-rate: every frame has exactly the same size")
+ok(0.008 < med < 0.045, f"constant-rate: frames on a fixed clock (median gap {med * 1000:.1f} ms for 50/s)")
+ok(55 < len(sizes) < 140, f"constant-rate: about 50 frames per second ({len(sizes)} in 2 s)")
+ok(m.shape_estimate(1.0).startswith("1.5 KB/s") and "GB per month" in m.shape_estimate(1.0), "traffic estimate is shown")
+
+# reassembly: sizes around the fragment boundary, interleaved senders
+a, b, ca, cb = chan_pair()
+ca.set_rate(400)
+got, errors = [], []
+sizes_sent = [0, 1, m.FRAG_DATA - 1, m.FRAG_DATA, m.FRAG_DATA + 1, 5000, 60000, 3 * m.FRAG_DATA]
+payloads = [os.urandom(n) for n in sizes_sent]
+
+
+def rx():
+    try:
+        while len(got) < len(payloads) * 2:
+            typ, data = cb.recv()
+            if typ != m.T_COVER:
+                got.append((typ, data))
+    except Exception as e:
+        errors.append(e)
+
+
+r = _th.Thread(target=rx, daemon=True)
+r.start()
+t1 = _th.Thread(target=lambda: [ca.send(m.T_MSG, p) for p in payloads])
+t2 = _th.Thread(target=lambda: [ca.send(m.T_FILE_CHUNK, p) for p in payloads])
+t1.start(); t2.start(); t1.join(60); t2.join(60); r.join(60)
+ok(not errors and len(got) == len(payloads) * 2, "fragments from two senders arrive and reassemble")
+ok([d for t, d in got if t == m.T_MSG] == payloads and [d for t, d in got if t == m.T_FILE_CHUNK] == payloads,
+   "interleaved messages are intact and in order per sender")
+# switching off flushes what is queued
+ca.send(m.T_MSG, b"last words")
+ca.set_rate(0)
+deadline = time.time() + 5
+last = None
+while time.time() < deadline and last is None:
+    typ, data = cb.recv()
+    if typ == m.T_MSG:
+        last = data
+ok(last == b"last words", "switching constant-rate off flushes queued data")
+ca.send(m.T_MSG, b"plain again")
+ok(cb.recv() == (m.T_MSG, b"plain again"), "normal sending works again after switching off")
+ca.close(); cb.close()
+
+# whole nodes: only one side shaped, then both
+S1, S2 = mk("s1"), mk("s2")
+sp1 = m.free_port(); S1.listen(sp1); S1.set_shape(100)
+S2.connect("127.0.0.1", sp1)
+ok(wait(lambda: S1.chans and S2.chans), "shaped and unshaped node connect")
+S1.send_text("shaped hello"); S2.send_text("plain hello")
+ok(wait(lambda: events(S2, "msg")) and wait(lambda: events(S1, "msg")), "chat works with one side constant-rate")
+S2.set_shape(100)
+fpath = os.path.join(TMP, "shaped.bin")
+open(fpath, "wb").write(os.urandom(150_000))
+while S1.send_lock.locked():
+    time.sleep(0.1)
+S1.send_file(fpath)
+S1.send_text("chat during transfer")
+ok(wait(lambda: any(e[2] == "chat during transfer" for e in events(S2, "msg")), 30), "chat is not blocked behind a file transfer")
+ok(wait(lambda: os.path.exists(os.path.join(m.DOWNLOAD_DIR, "shaped.bin")), 60), "file arrives over constant-rate traffic")
+ok(sha(os.path.join(m.DOWNLOAD_DIR, "shaped.bin")) == sha(fpath), "file hash equal over constant-rate traffic")
+S1.shutdown(); S2.shutdown()
+
 print("all loopback tests passed")
