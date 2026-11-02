@@ -872,6 +872,7 @@ class Node:
         self.scrub = scrub
         self.bridges = []   # [(line, transport)] - memory only, never written to disk
         self.names = {}     # fp -> nickname chosen by YOU (memory only, never sent or saved)
+        self.remote_names = {}  # fp -> name a relay hub gave that peer (memory only; your own nickname wins)
         self.closed = False       # closed mode: only allowlisted fingerprints may connect
         self.psk = None           # optional pre-shared secret (32 bytes, memory only)
         self.relay = False        # hub mode: forward chat messages between your peers
@@ -935,7 +936,7 @@ class Node:
 
     def label(self, fp):
         """Display name: your own nickname for this key, else the key's short ID."""
-        return self.names.get(fp) or short(fp)
+        return self.names.get(fp) or self.remote_names.get(fp) or short(fp)
 
     def find_peer(self, ident):
         """Finds a connected peer by nickname or by the start of its short ID."""
@@ -1006,7 +1007,11 @@ class Node:
             ch.set_rate(self.shape)
 
     def _forward(self, origin, text):
-        payload = json.dumps({"o": origin, "t": text}).encode()
+        d = {"o": origin, "t": text}
+        nick = self.names.get(origin)
+        if nick:
+            d["n"] = nick[:24]      # lets the other peers see who is talking (the hub's own nickname for them)
+        payload = json.dumps(d).encode()
         for ofp, ch in list(self.chans.items()):
             if ofp != origin:
                 try:
@@ -1333,6 +1338,9 @@ class Node:
                         origin = normalize_fp(str(d.get("o", "")))
                     except ValueError:
                         origin = ""
+                    nick = "".join(c for c in str(d.get("n", "")) if c.isprintable())[:24].strip()
+                    if origin and nick and origin != self.my_fp:
+                        self.remote_names[origin] = nick
                     self.emit("relayed", fp, origin, str(d.get("t", ""))[:4000])
                 elif typ == T_COVER:
                     pass  # dummy traffic

@@ -29,7 +29,7 @@ enum class Kind { ME, PEER, SYS, FILE }
 
 data class ChatLine(
     val id: Long, val who: String, val text: String, val kind: Kind,
-    val ts: Long = System.currentTimeMillis(), val color: Int = -1,
+    val ts: Long = System.currentTimeMillis(), val color: Int = -1, val via: String = "",
 )
 
 data class Confirm(val fp: String, val words: String)
@@ -53,6 +53,7 @@ data class UiState(
     val queue: List<QueueItem> = emptyList(),
     val confirm: Confirm? = null,
     val transfer: Transfer? = null,
+    val namePrompt: Peer? = null,
 )
 
 /**
@@ -260,12 +261,15 @@ object MuteController {
             "sys" -> addLine("", ev.getString("text"), Kind.SYS)
             "msg" -> addLine(ev.getString("name"), ev.getString("text"), Kind.PEER, colorOf(ev.getString("fp")))
             "relayed" -> addLine(
-                "${ev.getString("name")} (via ${ev.getString("via")})", ev.getString("text"),
-                Kind.PEER, colorOf(ev.getString("fp")),
+                ev.getString("name"), ev.getString("text"),
+                Kind.PEER, colorOf(ev.getString("fp")), via = ev.getString("via"),
             )
             "connected" -> {
                 addLine("", "${ev.getString("name")} connected securely", Kind.SYS)
                 applyState(b.callAttr("state").toString())
+                // offer to give the new peer a name right away (only you see it, and a relay hub passes it on)
+                val fp = ev.getString("fp")
+                _ui.update { st -> st.copy(namePrompt = st.peers.firstOrNull { it.fp == fp }) }
             }
             "disconnected" -> {
                 addLine("", "${ev.getString("name")} disconnected", Kind.SYS)
@@ -322,12 +326,14 @@ object MuteController {
         }
     }
 
-    private fun addLine(who: String, text: String, kind: Kind, color: Int = -1) {
+    private fun addLine(who: String, text: String, kind: Kind, color: Int = -1, via: String = "") {
         _ui.update {
-            val line = ChatLine(nextId++, who, text, kind, color = color)
+            val line = ChatLine(nextId++, who, text, kind, color = color, via = via)
             it.copy(lines = (it.lines + line).takeLast(MAX_LINES))
         }
     }
+
+    fun dismissNamePrompt() { _ui.update { it.copy(namePrompt = null) } }
 
     // ---- actions from the UI
     private fun call(name: String, vararg args: Any?) {

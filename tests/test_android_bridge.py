@@ -188,6 +188,26 @@ time.sleep(4)
 ok(F3.node.my_fp not in F1.node.chans, "wrong shared secret is refused by the listening side")
 ok(any("shared secret mismatch" in e["text"] for e in q1.of("sys")), "listener reports the shared secret mismatch")
 
+# ---- relay hub passes its nicknames on, so group members see each other's names
+H = ab.Bridge(os.path.join(TMP, "h"), os.path.join(TMP, "h_dl"), burner=True)
+X = ab.Bridge(os.path.join(TMP, "x"), os.path.join(TMP, "x_dl"), burner=True)
+Y = ab.Bridge(os.path.join(TMP, "y"), os.path.join(TMP, "y_dl"), burner=True)
+ph, px, py = Pump(H), Pump(X), Pump(Y)
+port5 = m.free_port()
+H.start_direct(port5)
+H.configure(json.dumps({"relay": True}))
+X.connect("127.0.0.1:%d" % port5)
+ok(wait(lambda: px.of("connected") and ph.of("connected"), 30), "relay: first member connects to the hub")
+Y.connect("127.0.0.1:%d" % port5)
+ok(wait(lambda: py.of("connected") and len(ph.of("connected")) >= 2, 30), "relay: second member connects to the hub")
+H.name_peer(X.node.my_fp, "Anna")
+X.send_text("hello group")
+ok(wait(lambda: py.of("relayed"), 20), "relay: the other member receives the forwarded message")
+rel = py.of("relayed")[-1]
+ok(rel["name"] == "Anna", "relay: the hub's nickname for the sender arrives (%s)" % rel["name"])
+for pmp in (ph, px, py):
+    pmp.running = False
+
 # ---- pause / resume / speed limit / folder transfer
 F1.configure(json.dumps({"speed_limit_kbs": 0}))
 F1.pause_transfers()

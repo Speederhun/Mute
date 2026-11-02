@@ -274,6 +274,11 @@ private fun ChatScreen(s: UiState) {
     val ctx = LocalContext.current
     val theme by MuteController.theme.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(Tab.CHAT) }
+    var renaming by remember { mutableStateOf<Peer?>(null) }
+    // a freshly connected peer: ask for a nickname straight away
+    LaunchedEffect(s.namePrompt) {
+        s.namePrompt?.let { renaming = it; MuteController.dismissNamePrompt() }
+    }
 
     Column(Modifier.fillMaxSize()) {
         // slim header: status on the left, the two quick safety actions on the right
@@ -281,7 +286,9 @@ private fun ChatScreen(s: UiState) {
             Column(Modifier.weight(1f)) {
                 Text("MUTE", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = theme.acc)
                 Text(
-                    (if (s.transport == "tor") "TOR" else "DIRECT") + "  ·  ${s.peers.size} peer(s)",
+                    (if (s.transport == "tor") "TOR" else "DIRECT") + "  ·  " +
+                        (if (s.peers.isEmpty()) "waiting for peers" else "${s.peers.size} connected") +
+                        (if (s.options.relay) "  ·  relay hub" else ""),
                     fontSize = 12.sp, color = theme.dim,
                 )
             }
@@ -305,7 +312,7 @@ private fun ChatScreen(s: UiState) {
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
-                Tab.CHAT -> ChatTab(s, theme, onConnect = { tab = Tab.CONNECT })
+                Tab.CHAT -> ChatTab(s, theme, onConnect = { tab = Tab.CONNECT }, onRename = { renaming = it })
                 Tab.CONNECT -> ConnectTab(s, theme)
                 Tab.FILES -> FilesTab(s, theme)
                 Tab.SETTINGS -> SettingsTab(s)
@@ -326,14 +333,31 @@ private fun ChatScreen(s: UiState) {
             }
         }
     }
+
+    renaming?.let { p ->
+        var name by remember(p.fp) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Name this peer") },
+            text = {
+                Column {
+                    Text("Never saved. If you run a relay hub, your other peers see this name next to the messages.", fontSize = 12.sp, color = theme.dim)
+                    OutlinedTextField(value = name, onValueChange = { name = it.take(24) }, singleLine = true)
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { MuteController.namePeer(p.fp, name); renaming = null }, enabled = name.isNotBlank()) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 // ---- Chat tab: peers, bubbles, big message bar
 @Composable
-private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit) {
+private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit, onRename: (Peer) -> Unit) {
     val ctx = LocalContext.current
     var input by remember { mutableStateOf("") }
-    var renaming by remember { mutableStateOf<Peer?>(null) }
     var attachMenu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val clock = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
@@ -354,11 +378,20 @@ private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 s.peers.forEach { p ->
                     OutlinedButton(
-                        onClick = { renaming = p }, shape = RoundedCornerShape(20.dp),
+                        onClick = { onRename(p) }, shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.peerColor(p.color)),
-                    ) { Text(p.name) }
+                    ) { Text("●  " + p.name) }
                 }
             }
+        }
+
+        if (s.peers.size >= 2 && !s.options.relay) {
+            Text(
+                "Several people are connected, but they cannot see each other. Turn on \"relay hub\" in Settings to make this a group chat.",
+                fontSize = 12.sp, color = theme.acc,
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(theme.acc.copy(alpha = 0.12f)).padding(10.dp),
+            )
         }
 
         Box(
@@ -418,23 +451,6 @@ private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit) {
         }
     }
 
-    renaming?.let { p ->
-        var name by remember(p.fp) { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { renaming = null },
-            title = { Text("Name this peer") },
-            text = {
-                Column {
-                    Text("Only you see this name. It is never sent or saved.", fontSize = 12.sp, color = theme.dim)
-                    OutlinedTextField(value = name, onValueChange = { name = it.take(24) }, singleLine = true)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { MuteController.namePeer(p.fp, name); renaming = null }, enabled = name.isNotBlank()) { Text("OK") }
-            },
-            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
-        )
-    }
 }
 
 // ---- Connect tab: connect to a peer, and what to send them
@@ -623,7 +639,12 @@ private fun LineRow(line: ChatLine, theme: ThemeColors, clock: SimpleDateFormat)
                         .background(if (mine) theme.btn else theme.ent)
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
-                    if (!mine) Text(line.who, fontSize = 11.sp, color = tint, fontWeight = FontWeight.SemiBold)
+                    if (!mine) {
+                        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(line.who, fontSize = 12.sp, color = tint, fontWeight = FontWeight.Bold)
+                            if (line.via.isNotEmpty()) Text("via ${line.via}", fontSize = 10.sp, color = theme.dim)
+                        }
+                    }
                     SelectionContainer { Text(line.text, fontSize = 15.sp, color = theme.fg) }
                     Text(time, fontSize = 10.sp, color = theme.dim, modifier = Modifier.align(Alignment.End))
                 }
