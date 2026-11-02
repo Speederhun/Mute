@@ -92,6 +92,20 @@ run {
                     val out = File(torJniDir, "$abi/$base")
                     out.parentFile.mkdirs()
                     zip.getInputStream(e).use { input -> out.outputStream().use { input.copyTo(it) } }
+                    // report the ELF segment alignment (Android 15 on 16 KB devices wants 0x4000 or more)
+                    try {
+                        val h = out.readBytes().let { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN) }
+                        if (h.getInt(0) == 0x464c457f && h.get(4).toInt() == 2) {
+                            val phoff = h.getLong(32).toInt(); val phentsize = h.getShort(54).toInt(); val phnum = h.getShort(56).toInt()
+                            var align = 0L
+                            for (i in 0 until phnum) {
+                                val ph = phoff + i * phentsize
+                                if (h.getInt(ph) == 1) align = maxOf(align, h.getLong(ph + 48))
+                            }
+                            logger.lifecycle("Tor file " + out.name + " (" + abi + "): segment alignment 0x" + align.toString(16) +
+                                if (align >= 0x4000) " (16 KB ok)" else " (NOT 16 KB aligned)")
+                        }
+                    } catch (_: Exception) {}
                 }
             }
         }
