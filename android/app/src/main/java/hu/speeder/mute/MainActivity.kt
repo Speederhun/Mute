@@ -29,6 +29,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -255,188 +266,148 @@ private fun ModeCard(title: String, subtitle: String, selected: Boolean, modifie
     }
 }
 
-// ------------------------------------------------------------------ chat
+// ------------------------------------------------------------------ chat (tabs: Chat, Connect, Files, Settings)
+private enum class Tab(val label: String) { CHAT("Chat"), CONNECT("Connect"), FILES("Files"), SETTINGS("Settings") }
+
 @Composable
 private fun ChatScreen(s: UiState) {
-    var showOptions by remember { mutableStateOf(false) }
-    if (showOptions) {
-        OptionsScreen(s, onClose = { showOptions = false })
-    } else {
-        ChatBody(s, onOptions = { showOptions = true })
-    }
-}
-
-@Composable
-private fun OptionsScreen(s: UiState, onClose: () -> Unit) {
-    val settings by MuteController.settings.collectAsStateWithLifecycle()
-    var opts by remember { mutableStateOf(MuteController.currentOptions()) }
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("OPTIONS", Modifier.weight(1f), fontFamily = Mono, fontSize = 20.sp)
-            Button(onClick = { MuteController.applyOptions(opts); onClose() }) { Text("Apply") }
-            TextButton(onClick = onClose) { Text("Close") }
-        }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            OptionsPanel(
-                opts = opts, onOpts = { opts = it },
-                settings = settings, onSettings = { MuteController.updateSettings(it) },
-                tor = s.transport == "tor", started = true, state = s,
-                saveTheme = !(s.burner || s.options.amnesia),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ChatBody(s: UiState, onOptions: () -> Unit) {
     val ctx = LocalContext.current
     val theme by MuteController.theme.collectAsStateWithLifecycle()
-    var addr by remember { mutableStateOf("") }
-    var peerFp by remember { mutableStateOf("") }
+    var tab by remember { mutableStateOf(Tab.CHAT) }
+
+    Column(Modifier.fillMaxSize()) {
+        // slim header: status on the left, the two quick safety actions on the right
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("MUTE", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = theme.acc)
+                Text(
+                    (if (s.transport == "tor") "TOR" else "DIRECT") + "  ·  ${s.peers.size} peer(s)",
+                    fontSize = 12.sp, color = theme.dim,
+                )
+            }
+            TextButton(onClick = { MuteController.lock() }) { Text("LOCK") }
+            TextButton(
+                onClick = {
+                    MuteController.shutdown()
+                    ctx.startService(Intent(ctx, MuteService::class.java).setAction(MuteService.ACTION_STOP))
+                    (ctx as? Activity)?.finishAndRemoveTask()
+                },
+                colors = ButtonDefaults.textButtonColors(contentColor = theme.red),
+            ) { Text("PANIC") }
+        }
+
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when (tab) {
+                Tab.CHAT -> ChatTab(s, theme, onConnect = { tab = Tab.CONNECT })
+                Tab.CONNECT -> ConnectTab(s, theme)
+                Tab.FILES -> FilesTab(s, theme)
+                Tab.SETTINGS -> SettingsTab(s)
+            }
+        }
+
+        NavigationBar(containerColor = theme.chat, windowInsets = WindowInsets(0, 0, 0, 0)) {
+            Tab.values().forEach { t ->
+                NavigationBarItem(
+                    selected = tab == t, onClick = { tab = t },
+                    icon = { Text(when (t) { Tab.CHAT -> "💬"; Tab.CONNECT -> "🔗"; Tab.FILES -> "📁"; Tab.SETTINGS -> "⚙" }, fontSize = 18.sp) },
+                    label = { Text(t.label, fontSize = 12.sp) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedTextColor = theme.acc, unselectedTextColor = theme.dim,
+                        indicatorColor = theme.acc.copy(alpha = 0.18f),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+// ---- Chat tab: peers, bubbles, big message bar
+@Composable
+private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit) {
+    val ctx = LocalContext.current
     var input by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf<Peer?>(null) }
+    var attachMenu by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    val clock = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val clock = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
 
     LaunchedEffect(s.lines.size) {
         if (s.lines.isNotEmpty()) listState.animateScrollToItem(s.lines.size - 1)
     }
-
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) MuteController.sendUri(ctx, uri)
     }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) MuteController.sendTree(ctx, uri)
     }
+    val canSend = s.peers.isNotEmpty()
 
-    val myAddress = s.onion ?: s.ips.firstOrNull()?.let { "$it:5555" } ?: ""
-
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // identity card: what the other person needs to verify you
-        Column(Modifier.fillMaxWidth().background(theme.chat).padding(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    (if (s.transport == "tor") "TOR" else "DIRECT") + "  ${s.peers.size} peer(s)",
-                    Modifier.weight(1f), fontFamily = Mono, color = theme.dim,
-                )
-            }
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TextButton(onClick = { MuteController.lock() }) { Text("LOCK") }
-                TextButton(onClick = { MuteController.wipeChat() }) { Text("WIPE") }
-                TextButton(onClick = onOptions) { Text("OPTIONS") }
-                OutlinedButton(
-                    onClick = {
-                        MuteController.shutdown()
-                        ctx.startService(Intent(ctx, MuteService::class.java).setAction(MuteService.ACTION_STOP))
-                        (ctx as? Activity)?.finishAndRemoveTask()
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.red),
-                ) { Text("PANIC") }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text("SEND THIS TO YOUR PEER", fontSize = 11.sp, letterSpacing = 1.sp, color = theme.acc, fontWeight = FontWeight.SemiBold)
-            SelectionContainer {
-                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text("Address", fontSize = 11.sp, color = theme.dim)
-                    if (myAddress.isNotEmpty()) {
-                        Text(myAddress, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
-                    } else {
-                        Text(
-                            if (s.transport == "tor") "Waiting for Tor to publish your .onion address..."
-                            else "No network address found. Connect to Wi-Fi or mobile data.",
-                            fontSize = 13.sp, color = theme.red,
-                        )
-                    }
-                    if (s.transport != "tor" && s.ips.size > 1) {
-                        Text("other: " + s.ips.drop(1).joinToString("  ") { "$it:5555" }, fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
-                    }
-                    Text("Verification words", fontSize = 11.sp, color = theme.dim)
-                    Text(s.words, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
-                    Text("Fingerprint", fontSize = 11.sp, color = theme.dim)
-                    Text(s.fp, fontFamily = Mono, fontSize = 11.sp, color = theme.fg)
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (myAddress.isNotEmpty()) {
-                    Button(onClick = {
-                        val text = "Mute address: $myAddress\nWords: ${s.words}\nFingerprint: ${s.fp}"
-                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
-                        ctx.startActivity(Intent.createChooser(send, "Send to your peer").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }) { Text("SHARE") }
-                    TextButton(onClick = { MuteController.copy(ctx, "address", myAddress) }) { Text("Copy address") }
-                }
-                TextButton(onClick = { MuteController.copy(ctx, "fingerprint", s.fp) }) { Text("Copy fp") }
-            }
-        }
-
-        // connect
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = addr, onValueChange = { addr = it }, singleLine = true,
-                label = { Text(if (s.transport == "tor") "peer .onion[:port]" else "peer host[:port]") },
-                modifier = Modifier.weight(1f),
-            )
-            OutlinedTextField(
-                value = peerFp, onValueChange = { peerFp = it }, singleLine = true,
-                label = { Text("fp (optional)") }, modifier = Modifier.weight(1f),
-            )
-            Button(onClick = { MuteController.connect(addr, peerFp); addr = "" }, enabled = addr.isNotBlank()) {
-                Text("GO")
-            }
-        }
-
-        // peers: tap to give someone a name (only you see it)
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (s.peers.isNotEmpty()) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState()),
-            ) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 s.peers.forEach { p ->
                     OutlinedButton(
-                        onClick = { renaming = p },
+                        onClick = { renaming = p }, shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.peerColor(p.color)),
-                    ) { Text(p.name, fontFamily = Mono) }
+                    ) { Text(p.name) }
                 }
             }
         }
 
-        // messages
-        LazyColumn(Modifier.weight(1f).fillMaxWidth().background(theme.chat), state = listState) {
-            items(s.lines, key = { it.id }) { line -> LineRow(line, theme, clock) }
+        Box(
+            Modifier.weight(1f).fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(theme.chat),
+        ) {
+            if (s.lines.isEmpty()) {
+                Text("No messages yet.", Modifier.align(Alignment.Center), color = theme.dim)
+            }
+            LazyColumn(
+                Modifier.fillMaxSize(), state = listState,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(s.lines, key = { it.id }) { line -> LineRow(line, theme, clock) }
+            }
         }
 
-        // file queue
-        if (s.queue.isNotEmpty()) {
-            Column {
-                s.queue.forEach { q ->
-                    Text("#${q.id} ${q.name} [${q.state}]", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = { MuteController.togglePause() }) {
-                        Text(if (s.options.paused) "Resume transfers" else "Pause transfers")
-                    }
-                    TextButton(onClick = { MuteController.cancelTransfers() }) { Text("Cancel all") }
-                }
+        if (!canSend) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Nobody connected yet.", Modifier.weight(1f), color = theme.dim, fontSize = 13.sp)
+                TextButton(onClick = onConnect) { Text("CONNECT") }
             }
         }
         s.transfer?.let { t ->
             Column {
-                Text("${t.label} ${t.done * 100 / t.total}%", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
+                Text("${t.label} ${t.done * 100 / t.total}%", fontSize = 12.sp, color = theme.dim)
                 LinearProgressIndicator(progress = { t.done.toFloat() / t.total }, modifier = Modifier.fillMaxWidth())
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { filePicker.launch(arrayOf("*/*")) }, enabled = s.peers.isNotEmpty()) { Text("FILE") }
-            TextButton(onClick = { folderPicker.launch(null) }, enabled = s.peers.isNotEmpty()) { Text("FOLDER") }
+        // message bar: attach, large rounded field, round send button
+        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+            Box {
+                Button(
+                    onClick = { attachMenu = true }, enabled = canSend, shape = CircleShape,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = theme.btn, contentColor = theme.fg),
+                    modifier = Modifier.size(52.dp),
+                ) { Text("+", fontSize = 24.sp) }
+                DropdownMenu(expanded = attachMenu, onDismissRequest = { attachMenu = false }) {
+                    DropdownMenuItem(text = { Text("Send a file") }, onClick = { attachMenu = false; filePicker.launch(arrayOf("*/*")) })
+                    DropdownMenuItem(text = { Text("Send a folder") }, onClick = { attachMenu = false; folderPicker.launch(null) })
+                }
+            }
             OutlinedTextField(
                 value = input, onValueChange = { input = it },
-                placeholder = { Text("message") }, modifier = Modifier.weight(1f), maxLines = 4,
+                placeholder = { Text(if (canSend) "Message" else "Connect to someone first") },
+                shape = RoundedCornerShape(26.dp), maxLines = 5,
+                modifier = Modifier.weight(1f).heightIn(min = 52.dp),
             )
             Button(
                 onClick = { MuteController.sendText(input); input = "" },
-                enabled = input.isNotBlank() && s.peers.isNotEmpty(),
-            ) { Text("SEND") }
+                enabled = input.isNotBlank() && canSend, shape = CircleShape,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                modifier = Modifier.size(52.dp),
+            ) { Text("➤", fontSize = 20.sp) }
         }
     }
 
@@ -452,26 +423,197 @@ private fun ChatBody(s: UiState, onOptions: () -> Unit) {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { MuteController.namePeer(p.fp, name); renaming = null }, enabled = name.isNotBlank()) {
-                    Text("OK")
-                }
+                TextButton(onClick = { MuteController.namePeer(p.fp, name); renaming = null }, enabled = name.isNotBlank()) { Text("OK") }
             },
             dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } },
         )
     }
 }
 
+// ---- Connect tab: connect to a peer, and what to send them
+@Composable
+private fun ConnectTab(s: UiState, theme: ThemeColors) {
+    val ctx = LocalContext.current
+    var addr by remember { mutableStateOf("") }
+    var peerFp by remember { mutableStateOf("") }
+    val myAddress = s.onion ?: s.ips.firstOrNull()?.let { "$it:5555" } ?: ""
+
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 12.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionCard(theme, "CONNECT TO SOMEONE") {
+            OutlinedTextField(
+                value = addr, onValueChange = { addr = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                label = { Text(if (s.transport == "tor") "Their .onion address[:port]" else "Their host[:port]") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = peerFp, onValueChange = { peerFp = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                label = { Text("Their fingerprint (optional, checked on connect)") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { MuteController.connect(addr, peerFp); addr = "" },
+                enabled = addr.isNotBlank(), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth(),
+            ) { Text("CONNECT", fontWeight = FontWeight.Bold) }
+        }
+
+        SectionCard(theme, "SEND THIS TO YOUR PEER") {
+            SelectionContainer {
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Address", fontSize = 11.sp, color = theme.dim)
+                    if (myAddress.isNotEmpty()) {
+                        Text(myAddress, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
+                    } else {
+                        Text(
+                            if (s.transport == "tor") "Waiting for Tor to publish your .onion address..."
+                            else "No network address found. Connect to Wi-Fi or mobile data.",
+                            fontSize = 13.sp, color = theme.red,
+                        )
+                    }
+                    if (s.transport != "tor" && s.ips.size > 1) {
+                        Text("other: " + s.ips.drop(1).joinToString("  ") { "$it:5555" }, fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("Verification words", fontSize = 11.sp, color = theme.dim)
+                    Text(s.words, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Fingerprint", fontSize = 11.sp, color = theme.dim)
+                    Text(s.fp, fontFamily = Mono, fontSize = 11.sp, color = theme.fg)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (myAddress.isNotEmpty()) {
+                    Button(onClick = {
+                        val text = "Mute address: $myAddress\nWords: ${s.words}\nFingerprint: ${s.fp}"
+                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                        ctx.startActivity(Intent.createChooser(send, "Send to your peer").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }, shape = RoundedCornerShape(12.dp)) { Text("SHARE") }
+                    TextButton(onClick = { MuteController.copy(ctx, "address", myAddress) }) { Text("Copy address") }
+                }
+                TextButton(onClick = { MuteController.copy(ctx, "fingerprint", s.fp) }) { Text("Copy fp") }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ---- Files tab
+@Composable
+private fun FilesTab(s: UiState, theme: ThemeColors) {
+    val ctx = LocalContext.current
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) MuteController.sendUri(ctx, uri)
+    }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) MuteController.sendTree(ctx, uri)
+    }
+    val canSend = s.peers.isNotEmpty()
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 12.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionCard(theme, "SEND") {
+            if (!canSend) Text("Connect to someone first (Connect tab).", fontSize = 13.sp, color = theme.dim)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(onClick = { filePicker.launch(arrayOf("*/*")) }, enabled = canSend, shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("📄  File") }
+                Button(onClick = { folderPicker.launch(null) }, enabled = canSend, shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 52.dp)) { Text("📁  Folder") }
+            }
+            Text("Folders are sent as one clean zip.", fontSize = 12.sp, color = theme.dim)
+        }
+
+        s.transfer?.let { t ->
+            SectionCard(theme, "IN PROGRESS") {
+                Text("${t.label}  ${t.done * 100 / t.total}%", fontSize = 13.sp)
+                LinearProgressIndicator(progress = { t.done.toFloat() / t.total }, modifier = Modifier.fillMaxWidth())
+            }
+        }
+
+        SectionCard(theme, "QUEUE") {
+            if (s.queue.isEmpty()) {
+                Text("Nothing waiting.", fontSize = 13.sp, color = theme.dim)
+            } else {
+                s.queue.forEach { q -> Text("#${q.id}  ${q.name}  [${q.state}]", fontFamily = Mono, fontSize = 12.sp, color = theme.fg) }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { MuteController.togglePause() }) {
+                        Text(if (s.options.paused) "Resume transfers" else "Pause transfers")
+                    }
+                    TextButton(onClick = { MuteController.cancelTransfers() }) { Text("Cancel all") }
+                }
+            }
+        }
+        Text("Received files go to Android/data/hu.speeder.mute/files/Mute", fontSize = 11.sp, color = theme.dim)
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ---- Settings tab: wipe + all options
+@Composable
+private fun SettingsTab(s: UiState) {
+    val settings by MuteController.settings.collectAsStateWithLifecycle()
+    var opts by remember { mutableStateOf(MuteController.currentOptions()) }
+    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = { MuteController.applyOptions(opts) }, shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f)) {
+                Text("APPLY")
+            }
+            OutlinedButton(onClick = { MuteController.wipeChat() }, shape = RoundedCornerShape(12.dp), modifier = Modifier.weight(1f)) {
+                Text("WIPE CHAT")
+            }
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            OptionsPanel(
+                opts = opts, onOpts = { opts = it },
+                settings = settings, onSettings = { MuteController.updateSettings(it) },
+                tor = s.transport == "tor", started = true, state = s,
+                saveTheme = !(s.burner || s.options.amnesia),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SectionCard(theme: ThemeColors, title: String, content: @Composable () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(theme.chat).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(title, fontSize = 11.sp, letterSpacing = 1.sp, color = theme.acc, fontWeight = FontWeight.SemiBold)
+        content()
+    }
+}
+
 @Composable
 private fun LineRow(line: ChatLine, theme: ThemeColors, clock: SimpleDateFormat) {
-    val time = "[${clock.format(Date(line.ts))}] "
+    val time = clock.format(Date(line.ts))
     when (line.kind) {
-        Kind.SYS -> Text("$time[*] ${line.text}", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
-        Kind.FILE -> Text("$time[+] ${line.text}", fontFamily = Mono, fontSize = 13.sp, color = theme.dim)
-        Kind.ME -> Text("${time}me> ${line.text}", fontFamily = Mono, fontSize = 14.sp, color = theme.fg)
-        Kind.PEER -> Text(
-            "$time${line.who}> ${line.text}", fontFamily = Mono, fontSize = 14.sp,
-            color = theme.peerColor(line.color),
+        Kind.SYS -> Text(
+            "$time  ${line.text}", fontSize = 11.sp, color = theme.dim,
+            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
         )
+        Kind.FILE -> Text(
+            "📎 ${line.text}  ·  $time", fontSize = 12.sp, color = theme.acc,
+            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+        )
+        Kind.ME, Kind.PEER -> {
+            val mine = line.kind == Kind.ME
+            val tint = if (mine) theme.fg else theme.peerColor(line.color)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+                Column(
+                    Modifier.widthIn(max = 300.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(if (mine) theme.btn else theme.ent)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    if (!mine) Text(line.who, fontSize = 11.sp, color = tint, fontWeight = FontWeight.SemiBold)
+                    SelectionContainer { Text(line.text, fontSize = 15.sp, color = theme.fg) }
+                    Text(time, fontSize = 10.sp, color = theme.dim, modifier = Modifier.align(Alignment.End))
+                }
+            }
+        }
     }
 }
 

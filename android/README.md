@@ -10,7 +10,7 @@ android/
   app/src/main/java/.../
     MuteController.kt          owns the Python bridge, turns events into UiState
     MuteService.kt             foreground service that keeps the process (and tor) alive
-    MainActivity.kt            Jetpack Compose UI: setup, chat, fingerprint check
+    MainActivity.kt            Jetpack Compose UI: setup, tabbed chat (Chat, Connect, Files, Settings), fingerprint check
 ```
 
 `mute.py` and `android/python/` are copied into `app/build/mute-python` at build time (`syncMutePython` task).
