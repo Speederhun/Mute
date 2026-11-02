@@ -2,7 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("com.chaquo.python")
+    id("com.chaquo.python") version "17.1.0"
 }
 
 android {
