@@ -11,10 +11,12 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,56 +36,48 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-private val Green = Color(0xFF00FF66)
-private val Dim = Color(0xFF6FA882)
-private val Panel = Color(0xFF0B140E)
 private val Mono = FontFamily.Monospace
-
-private val HackerColors = darkColorScheme(
-    primary = Green, onPrimary = Color.Black,
-    background = Color.Black, onBackground = Green,
-    surface = Panel, onSurface = Green,
-    error = Color(0xFFFF5555),
-)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         // No screenshots, screen recording or recent-apps thumbnails of the chat.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
-        setContent {
-            MaterialTheme(colorScheme = HackerColors) {
-                Surface(Modifier.fillMaxSize().safeDrawingPadding(), color = Color.Black) {
-                    MuteApp()
-                }
-            }
-        }
+        MuteController.initialize(this)
+        setContent { MuteRoot() }
+    }
+
+    /** Any touch or key press counts as activity for the idle auto-lock. */
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        MuteController.touch()
     }
 }
 
@@ -92,21 +86,45 @@ private fun startKeepAlive(ctx: Context) {
 }
 
 @Composable
+private fun MuteRoot() {
+    val theme by MuteController.theme.collectAsStateWithLifecycle()
+    val view = LocalView.current
+    SideEffect {
+        (view.context as? Activity)?.window?.let { w ->
+            WindowCompat.getInsetsController(w, view).apply {
+                isAppearanceLightStatusBars = theme.isLight
+                isAppearanceLightNavigationBars = theme.isLight
+            }
+        }
+    }
+    MaterialTheme(colorScheme = theme.scheme()) {
+        Box(Modifier.fillMaxSize().background(theme.bg).safeDrawingPadding()) {
+            MuteApp()
+        }
+    }
+}
+
+@Composable
 private fun MuteApp() {
     val s by MuteController.ui.collectAsStateWithLifecycle()
+    val locked by MuteController.locked.collectAsStateWithLifecycle()
     if (s.started) ChatScreen(s) else SetupScreen(s)
-    s.confirm?.let { ConfirmDialog(it) }
+    // while locked nothing may be shown - a pending fingerprint prompt waits (it times out after 3 minutes)
+    if (!locked) s.confirm?.let { ConfirmDialog(it) }
+    if (locked) LockScreen()
 }
 
 // ------------------------------------------------------------------ setup
 @Composable
 private fun SetupScreen(s: UiState) {
     val ctx = LocalContext.current
+    val settings by MuteController.settings.collectAsStateWithLifecycle()
     var idState by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var burner by remember { mutableStateOf(false) }
     var tor by remember { mutableStateOf(false) }
-    var bridges by remember { mutableStateOf("") }
+    var showOptions by remember { mutableStateOf(false) }
+    var opts by remember { mutableStateOf(Options()) }
 
     LaunchedEffect(Unit) {
         idState = withContext(Dispatchers.IO) {
@@ -114,10 +132,14 @@ private fun SetupScreen(s: UiState) {
         }
     }
 
+    fun go() {
+        startKeepAlive(ctx)
+        MuteController.start(ctx, pass, burner, tor, opts.copy(amnesia = opts.amnesia || burner))
+    }
+
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         // The service runs either way; without the permission the notification is just hidden.
-        startKeepAlive(ctx)
-        MuteController.start(ctx, pass, burner, tor, bridges)
+        go()
     }
 
     val needsPass = idState == "encrypted" && !burner
@@ -126,9 +148,9 @@ private fun SetupScreen(s: UiState) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("MUTE", fontFamily = Mono, fontSize = 28.sp)
-        Text("Serverless end-to-end encrypted chat and file transfer.", color = Dim, fontFamily = Mono)
+        Text("Serverless end-to-end encrypted chat and file transfer.", color = MaterialTheme.colorScheme.outline, fontFamily = Mono)
 
-        ToggleRow("Burner identity (random key, nothing saved)", burner) { burner = it }
+        SwitchRow("Burner identity (random key, nothing saved)", burner) { burner = it }
         if (!burner) {
             OutlinedTextField(
                 value = pass, onValueChange = { pass = it }, singleLine = true,
@@ -147,16 +169,22 @@ private fun SetupScreen(s: UiState) {
             )
         }
 
-        ToggleRow("Tor mode (onion address, hides both IPs)", tor) { tor = it }
+        SwitchRow("Tor mode (onion address, hides both IPs)", tor) { tor = it }
         if (tor) {
-            OutlinedTextField(
-                value = bridges, onValueChange = { bridges = it },
-                label = { Text("Bridges (optional, one per line)") },
-                modifier = Modifier.fillMaxWidth(), minLines = 3,
-            )
-            Text("Starting Tor can take up to a minute.", color = Dim, fontFamily = Mono, fontSize = 12.sp)
+            Text("Starting Tor can take up to a minute.", color = MaterialTheme.colorScheme.outline, fontFamily = Mono, fontSize = 12.sp)
         } else {
-            Text("DIRECT: plain TCP on port 5555 (LAN, port forward or VPN).", color = Dim, fontFamily = Mono, fontSize = 12.sp)
+            Text("DIRECT: plain TCP on port 5555 (LAN, port forward or VPN).", color = MaterialTheme.colorScheme.outline, fontFamily = Mono, fontSize = 12.sp)
+        }
+
+        OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.fillMaxWidth()) {
+            Text(if (showOptions) "Hide options" else "Options")
+        }
+        if (showOptions) {
+            OptionsPanel(
+                opts = opts, onOpts = { opts = it },
+                settings = settings, onSettings = { MuteController.updateSettings(it) },
+                tor = tor, started = false, state = null, saveTheme = !(burner || opts.amnesia),
+            )
         }
 
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontFamily = Mono) }
@@ -169,8 +197,7 @@ private fun SetupScreen(s: UiState) {
                 ) {
                     notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                 } else {
-                    startKeepAlive(ctx)
-                    MuteController.start(ctx, pass, burner, tor, bridges)
+                    go()
                 }
             },
             enabled = !s.busy && (!needsPass || pass.isNotEmpty()),
@@ -179,61 +206,95 @@ private fun SetupScreen(s: UiState) {
     }
 }
 
-@Composable
-private fun ToggleRow(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f), fontFamily = Mono)
-        Switch(checked = value, onCheckedChange = onChange)
-    }
-}
-
 // ------------------------------------------------------------------ chat
 @Composable
 private fun ChatScreen(s: UiState) {
+    var showOptions by remember { mutableStateOf(false) }
+    if (showOptions) {
+        OptionsScreen(s, onClose = { showOptions = false })
+    } else {
+        ChatBody(s, onOptions = { showOptions = true })
+    }
+}
+
+@Composable
+private fun OptionsScreen(s: UiState, onClose: () -> Unit) {
+    val settings by MuteController.settings.collectAsStateWithLifecycle()
+    var opts by remember { mutableStateOf(MuteController.currentOptions()) }
+    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("OPTIONS", Modifier.weight(1f), fontFamily = Mono, fontSize = 20.sp)
+            Button(onClick = { MuteController.applyOptions(opts); onClose() }) { Text("Apply") }
+            TextButton(onClick = onClose) { Text("Close") }
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            OptionsPanel(
+                opts = opts, onOpts = { opts = it },
+                settings = settings, onSettings = { MuteController.updateSettings(it) },
+                tor = s.transport == "tor", started = true, state = s,
+                saveTheme = !(s.burner || s.options.amnesia),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatBody(s: UiState, onOptions: () -> Unit) {
     val ctx = LocalContext.current
-    val clipboard = LocalClipboardManager.current
+    val theme by MuteController.theme.collectAsStateWithLifecycle()
     var addr by remember { mutableStateOf("") }
     var peerFp by remember { mutableStateOf("") }
     var input by remember { mutableStateOf("") }
     var renaming by remember { mutableStateOf<Peer?>(null) }
     val listState = rememberLazyListState()
+    val clock = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
     LaunchedEffect(s.lines.size) {
         if (s.lines.isNotEmpty()) listState.animateScrollToItem(s.lines.size - 1)
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) MuteController.sendUri(ctx, uri)
+    }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) MuteController.sendTree(ctx, uri)
     }
 
     val myAddress = s.onion ?: s.ips.firstOrNull()?.let { "$it:5555" } ?: ""
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // identity card: what the other person needs to verify you
-        Column(Modifier.fillMaxWidth().background(Panel).padding(10.dp)) {
+        Column(Modifier.fillMaxWidth().background(theme.chat).padding(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (s.transport == "tor") "TOR" else "DIRECT", fontFamily = Mono, color = Dim)
-                Text("  ${s.peers.size} peer(s)", Modifier.weight(1f), fontFamily = Mono, color = Dim)
+                Text(
+                    (if (s.transport == "tor") "TOR" else "DIRECT") + "  ${s.peers.size} peer(s)",
+                    Modifier.weight(1f), fontFamily = Mono, color = theme.dim,
+                )
+            }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { MuteController.lock() }) { Text("LOCK") }
+                TextButton(onClick = { MuteController.wipeChat() }) { Text("WIPE") }
+                TextButton(onClick = onOptions) { Text("OPTIONS") }
                 OutlinedButton(
                     onClick = {
                         MuteController.shutdown()
                         ctx.startService(Intent(ctx, MuteService::class.java).setAction(MuteService.ACTION_STOP))
                         (ctx as? Activity)?.finishAndRemoveTask()
                     },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.red),
                 ) { Text("PANIC") }
             }
             SelectionContainer {
                 Column {
                     Text("words: ${s.words}", fontFamily = Mono, fontSize = 13.sp)
-                    Text("fp: ${s.fp}", fontFamily = Mono, fontSize = 11.sp, color = Dim)
-                    if (myAddress.isNotEmpty()) Text("addr: $myAddress", fontFamily = Mono, fontSize = 11.sp, color = Dim)
+                    Text("fp: ${s.fp}", fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
+                    if (myAddress.isNotEmpty()) Text("addr: $myAddress", fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
                 }
             }
             Row {
-                TextButton(onClick = { clipboard.setText(AnnotatedString(s.fp)) }) { Text("Copy fp") }
+                TextButton(onClick = { MuteController.copy(ctx, "fingerprint", s.fp) }) { Text("Copy fp") }
                 if (myAddress.isNotEmpty()) {
-                    TextButton(onClick = { clipboard.setText(AnnotatedString(myAddress)) }) { Text("Copy address") }
+                    TextButton(onClick = { MuteController.copy(ctx, "address", myAddress) }) { Text("Copy address") }
                 }
             }
         }
@@ -261,26 +322,43 @@ private fun ChatScreen(s: UiState) {
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
             ) {
                 s.peers.forEach { p ->
-                    OutlinedButton(onClick = { renaming = p }) { Text(p.name, fontFamily = Mono) }
+                    OutlinedButton(
+                        onClick = { renaming = p },
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.peerColor(p.color)),
+                    ) { Text(p.name, fontFamily = Mono) }
                 }
             }
         }
 
         // messages
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState) {
-            items(s.lines, key = { it.id }) { line -> LineRow(line) }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().background(theme.chat), state = listState) {
+            items(s.lines, key = { it.id }) { line -> LineRow(line, theme, clock) }
         }
 
+        // file queue
+        if (s.queue.isNotEmpty()) {
+            Column {
+                s.queue.forEach { q ->
+                    Text("#${q.id} ${q.name} [${q.state}]", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = { MuteController.togglePause() }) {
+                        Text(if (s.options.paused) "Resume transfers" else "Pause transfers")
+                    }
+                    TextButton(onClick = { MuteController.cancelTransfers() }) { Text("Cancel all") }
+                }
+            }
+        }
         s.transfer?.let { t ->
             Column {
-                Text("${t.label} ${t.done * 100 / t.total}%", fontFamily = Mono, fontSize = 12.sp, color = Dim)
+                Text("${t.label} ${t.done * 100 / t.total}%", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
                 LinearProgressIndicator(progress = { t.done.toFloat() / t.total }, modifier = Modifier.fillMaxWidth())
-                TextButton(onClick = { MuteController.cancelTransfers() }) { Text("Cancel transfers") }
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { picker.launch(arrayOf("*/*")) }, enabled = s.peers.isNotEmpty()) { Text("FILE") }
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { filePicker.launch(arrayOf("*/*")) }, enabled = s.peers.isNotEmpty()) { Text("FILE") }
+            TextButton(onClick = { folderPicker.launch(null) }, enabled = s.peers.isNotEmpty()) { Text("FOLDER") }
             OutlinedTextField(
                 value = input, onValueChange = { input = it },
                 placeholder = { Text("message") }, modifier = Modifier.weight(1f), maxLines = 4,
@@ -299,7 +377,7 @@ private fun ChatScreen(s: UiState) {
             title = { Text("Name this peer") },
             text = {
                 Column {
-                    Text("Only you see this name. It is never sent or saved.", fontSize = 12.sp, color = Dim)
+                    Text("Only you see this name. It is never sent or saved.", fontSize = 12.sp, color = theme.dim)
                     OutlinedTextField(value = name, onValueChange = { name = it.take(24) }, singleLine = true)
                 }
             },
@@ -314,18 +392,53 @@ private fun ChatScreen(s: UiState) {
 }
 
 @Composable
-private fun LineRow(line: ChatLine) {
+private fun LineRow(line: ChatLine, theme: ThemeColors, clock: SimpleDateFormat) {
+    val time = "[${clock.format(Date(line.ts))}] "
     when (line.kind) {
-        Kind.SYS -> Text("[*] ${line.text}", fontFamily = Mono, fontSize = 12.sp, color = Dim)
-        Kind.FILE -> Text("[+] ${line.text}", fontFamily = Mono, fontSize = 13.sp, color = Dim)
-        Kind.ME -> Text("me> ${line.text}", fontFamily = Mono, fontSize = 14.sp, color = Green)
-        Kind.PEER -> Text("${line.who}> ${line.text}", fontFamily = Mono, fontSize = 14.sp, color = Color.White)
+        Kind.SYS -> Text("$time[*] ${line.text}", fontFamily = Mono, fontSize = 12.sp, color = theme.dim)
+        Kind.FILE -> Text("$time[+] ${line.text}", fontFamily = Mono, fontSize = 13.sp, color = theme.dim)
+        Kind.ME -> Text("${time}me> ${line.text}", fontFamily = Mono, fontSize = 14.sp, color = theme.fg)
+        Kind.PEER -> Text(
+            "$time${line.who}> ${line.text}", fontFamily = Mono, fontSize = 14.sp,
+            color = theme.peerColor(line.color),
+        )
+    }
+}
+
+// ------------------------------------------------------------------ lock screen
+@Composable
+private fun LockScreen() {
+    val theme by MuteController.theme.collectAsStateWithLifecycle()
+    val settings by MuteController.settings.collectAsStateWithLifecycle()
+    var attempt by remember { mutableStateOf("") }
+    var wrong by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxSize().background(theme.bg).padding(24.dp),
+        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("LOCKED", fontFamily = Mono, fontSize = 28.sp)
+        if (settings.lockPassword.isNotEmpty()) {
+            OutlinedTextField(
+                value = attempt, onValueChange = { attempt = it; wrong = false }, singleLine = true,
+                label = { Text(if (wrong) "Wrong password" else "Password") },
+                isError = wrong, visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            )
+        } else {
+            Text("Press Unlock. Set a lock password in Options.", fontFamily = Mono, fontSize = 12.sp,
+                color = theme.dim, modifier = Modifier.padding(top = 8.dp))
+        }
+        Button(
+            onClick = { if (!MuteController.unlock(attempt)) { wrong = true; attempt = "" } },
+            modifier = Modifier.padding(top = 16.dp),
+        ) { Text("Unlock") }
     }
 }
 
 // ------------------------------------------------------------------ fingerprint check
 @Composable
 private fun ConfirmDialog(c: Confirm) {
+    val theme by MuteController.theme.collectAsStateWithLifecycle()
     AlertDialog(
         onDismissRequest = { MuteController.answerConfirm(false) },
         title = { Text("Unknown peer") },
@@ -335,7 +448,7 @@ private fun ConfirmDialog(c: Confirm) {
                 SelectionContainer {
                     Column {
                         Text(c.words, fontFamily = Mono, fontSize = 16.sp)
-                        Text(c.fp, fontFamily = Mono, fontSize = 11.sp, color = Dim)
+                        Text(c.fp, fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
                     }
                 }
             }

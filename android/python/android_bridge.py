@@ -9,6 +9,7 @@ mute.py itself is used unchanged: this module only
 All methods are safe to call from any thread, but start_tor() blocks for up to a minute,
 so Kotlin must call it from a background thread.
 """
+import base64
 import json
 import os
 import threading
@@ -32,6 +33,40 @@ def check_passphrase(app_dir, passphrase):
         return False
 
 
+def themes():
+    """The desktop colour themes (single source of truth: mute.THEMES) as JSON."""
+    return json.dumps(mute.THEMES)
+
+
+def cover_profiles():
+    return json.dumps({k: {"text": v, "estimate": mute.cover_estimate(k)}
+                       for k, v in mute.COVER_PROFILES.items()})
+
+
+def shape_labels():
+    return json.dumps([[label, rate] for label, rate in mute.SHAPE_LABELS])
+
+
+def shape_estimate(rate, tor):
+    return mute.shape_estimate(float(rate), bool(tor))
+
+
+def moat_captcha(transport="obfs4", proxy=""):
+    """Asks the Tor Project for a captcha. Returns JSON {image: base64 jpeg, challenge}. Blocking network call."""
+    img, challenge = mute.moat_captcha(transport, mute.parse_proxy(proxy))
+    return json.dumps({"image": base64.b64encode(img).decode(), "challenge": challenge})
+
+
+def moat_solve(challenge, solution, transport="obfs4", proxy=""):
+    """Returns the bridge lines (one per line) for a solved captcha. Blocking network call."""
+    return "\n".join(mute.moat_solve(challenge, solution, transport, mute.parse_proxy(proxy)))
+
+
+def moat_builtin(proxy=""):
+    """Built-in bridges that need no captcha. Blocking network call."""
+    return "\n".join(mute.moat_builtin(mute.parse_proxy(proxy)))
+
+
 def _patch_tor_lookup(tor_cmd, pt_dir):
     """Android cannot search PATH for tor: the binaries live in the app's native library dir."""
     if tor_cmd:
@@ -49,7 +84,7 @@ def _patch_tor_lookup(tor_cmd, pt_dir):
 
 class Bridge:
     def __init__(self, app_dir, download_dir, tor_cmd=None, pt_dir=None,
-                 passphrase=None, burner=False, scrub=True):
+                 passphrase=None, burner=False, scrub=True, amnesia=False):
         os.makedirs(app_dir, exist_ok=True)
         os.makedirs(download_dir, exist_ok=True)
         mute.APP_DIR = app_dir
@@ -57,7 +92,8 @@ class Bridge:
         _patch_tor_lookup(tor_cmd, pt_dir)
         self._confirm_lock = threading.Lock()
         self._pending = {}  # fp -> {"ev": Event, "ok": bool}
-        self.node = mute.Node(self._confirm_cb, passphrase or None, amnesia=False,
+        self._client_auth_pub = None
+        self.node = mute.Node(self._confirm_cb, passphrase or None, amnesia=bool(amnesia),
                               app_dir=app_dir, scrub=scrub, burner=burner)
         self.node.emit("sys", "Fingerprint " + self.node.my_fp)
 
@@ -72,6 +108,16 @@ class Bridge:
             "onion": (n.onion + ":%d" % mute.DEFAULT_PORT) if n.onion else None,
             "listening": n.server is not None,
             "burner": n.burner,
+            "options": {
+                "closed": n.closed, "relay": n.relay, "cover": n.cover,
+                "cover_profile": n.cover_profile, "shape": n.shape,
+                "speed_limit_kbs": n.speed_limit // 1024, "ratchet": n.ratchet,
+                "proxy": ("%s:%d" % n.proxy) if n.proxy else "",
+                "amnesia": n.amnesia, "scrub": n.scrub, "paused": n.paused.is_set(),
+                "psk": n.psk is not None, "allowed_clients": len(n.allowed_clients),
+                "bridges": len(n.bridges), "client_auth_pub": self._client_auth_pub,
+                "known": len(n.known),
+            },
             "peers": [{"fp": fp, "name": n.label(fp), "id": mute.short(fp)} for fp in n.chans],
         })
 
@@ -92,6 +138,50 @@ class Bridge:
         if slot:
             slot["ok"] = bool(accept)
             slot["ev"].set()
+
+    # ---- options (any subset of keys; raises ValueError on bad input; returns the new state)
+    def configure(self, opts_json):
+        o = json.loads(opts_json)
+        n = self.node
+        if "scrub" in o:
+            n.scrub = bool(o["scrub"])
+        if "amnesia" in o:
+            n.amnesia = bool(o["amnesia"]) or n.burner
+        if "closed" in o:
+            n.closed = bool(o["closed"])
+        for line in str(o.get("allow", "")).splitlines():
+            if line.strip():
+                n.allow(line)
+        if "psk" in o:
+            n.set_psk(o["psk"] or "")
+        if "relay" in o:
+            n.relay = bool(o["relay"])
+        if "cover" in o or "cover_profile" in o:
+            n.set_cover(bool(o.get("cover", n.cover)), o.get("cover_profile"))
+        if "shape" in o:
+            rate = float(o["shape"])
+            if rate < 0 or rate > 200:
+                raise ValueError("Constant-rate must be between 0 and 200 frames per second")
+            n.set_shape(rate)
+        if "speed_limit_kbs" in o:
+            n.set_speed_limit(int(float(o["speed_limit_kbs"]) * 1024))
+        if "ratchet" in o:
+            n.ratchet = max(0, int(o["ratchet"]))
+        if "proxy" in o:
+            n.proxy = mute.parse_proxy(o["proxy"])
+        if "allowed_clients" in o:
+            n.set_allowed_clients(o["allowed_clients"] or "")
+        if o.get("new_client_auth"):
+            self._client_auth_pub = n.new_client_auth()
+        if "bridges" in o:
+            if (o["bridges"] or "").strip():
+                n.set_bridges(o["bridges"])
+            else:
+                n.bridges = []
+        return self.state()
+
+    def queue(self):
+        return json.dumps([list(i) for i in self.node.queue_info()])
 
     # ---- network
     def start_direct(self, port=mute.DEFAULT_PORT):

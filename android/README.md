@@ -46,12 +46,22 @@ python tests/test_android_bridge.py
 
 ## Status
 
-Implemented: DIRECT and TOR modes (incl. bridges as pasted text), burner identity, identity passphrase,
-fingerprint + 6-word verification, chat, peer nicknames, file sending/receiving with progress, PANIC.
+Everything from the desktop version is in, except message notifications (deliberately left out; the foreground
+notification only says the app is running):
 
-Not in the first round: group-chat options (relay hub, cover traffic, constant-rate), closed mode / shared secret /
-onion client authorization (the bridge already exposes `set_closed`, `allow`, `set_psk`), Moat bridge download,
-auto-lock, themes, folder sending.
+- DIRECT and TOR modes, Tor bridges (pasted, built-in list, or fetched from the Tor Project with a captcha), SOCKS5 proxy
+- burner identity, identity passphrase, amnesia mode, key-renewal interval
+- fingerprint + 6-word verification, closed mode with allowlist, shared secret (PSK), onion client authorization
+- chat with timestamps, per-peer colours and nicknames, group chat (several peers), relay hub, cover traffic profiles,
+  constant-rate traffic
+- file and folder sending (folders become a clean zip), progress, queue, pause/resume, cancel, speed limit, metadata scrubbing
+- PANIC, WIPE (chat window only), lock screen with optional password, auto-lock on idle, auto-clear of old chat lines,
+  clipboard cleared 30 s after copying, screenshot/recording block
+- the 8 desktop themes (taken from `mute.THEMES`)
 
-Not yet verified on a device: the Gradle build, the Chaquopy wheel for `cryptography>=42`, and the exact file names
-of the Briar binaries in `nativeLibraryDir` (the bridge looks for `libtor.so` and `lib<name>.so` for the transports).
+Options live in memory only (like on the desktop); only the identity key, the optional known-peers list and the theme
+name are written to the app's private storage.
+
+Not yet verified on a device: the Gradle build, the Kotlin sources (they have not been compiled), the Chaquopy wheel for
+`cryptography>=42`, and the exact file names of the Briar binaries in `nativeLibraryDir` (the bridge looks for `libtor.so`
+and `lib<name>.so` for the transports). The Python side is covered by `tests/test_android_bridge.py`.

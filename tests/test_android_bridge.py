@@ -118,6 +118,104 @@ ok(m.find_pt(("lyrebird", "obfs4proxy")) == os.path.join(ptd, "liblyrebird.so"),
 ok(m.find_pt(("snowflake-client",)) is None, "missing transport is reported as missing")
 m.find_tor, m.find_pt = real_find_tor, real_find_pt
 
+# ---- options: configure() and state()["options"]
+def opts(b):
+    return json.loads(b.state())["options"]
+
+
+th = json.loads(ab.themes())
+ok(len(th) == 8 and all(k in th["hacker"] for k in m.THEME_ROLES + ("pal",)), "themes come from mute.THEMES")
+ok(set(json.loads(ab.cover_profiles())) == set(m.COVER_PROFILES), "cover profiles listed with estimates")
+ok(json.loads(ab.shape_labels())[0] == ["off", 0.0], "shape labels listed")
+ok("KB/s" in ab.shape_estimate(1.0, True), "shape estimate text")
+
+C.configure(json.dumps({"relay": True, "cover": True, "cover_profile": "chat", "shape": 0.2,
+                        "speed_limit_kbs": 64, "ratchet": 300, "proxy": "127.0.0.1:9050",
+                        "scrub": False, "amnesia": True}))
+o = opts(C)
+ok(o["relay"] and o["cover"] and o["cover_profile"] == "chat" and o["shape"] == 0.2, "relay/cover/shape applied")
+ok(o["speed_limit_kbs"] == 64 and o["ratchet"] == 300 and o["proxy"] == "127.0.0.1:9050", "limit/ratchet/proxy applied")
+ok(not o["scrub"] and o["amnesia"], "scrub and amnesia applied")
+C.configure(json.dumps({"cover": False, "shape": 0, "proxy": ""}))
+ok(not opts(C)["cover"] and opts(C)["shape"] == 0 and opts(C)["proxy"] == "", "options switch off again")
+for bad in ({"shape": 500}, {"cover_profile": "nope"}, {"allowed_clients": "tooshort"}, {"proxy": "h:notaport"}):
+    try:
+        C.configure(json.dumps(bad))
+        ok(False, "bad option accepted: %r" % bad)
+    except ValueError:
+        ok(True, "bad option rejected: %r" % list(bad))
+
+pub = json.loads(C.configure(json.dumps({"new_client_auth": True})))["options"]["client_auth_pub"]
+ok(pub and len(pub) == 52, "onion client auth key is 52 characters")
+C.configure(json.dumps({"allowed_clients": pub}))
+ok(opts(C)["allowed_clients"] == 1, "allowed onion client keys stored")
+C.configure(json.dumps({"bridges": "obfs4 1.2.3.4:443 " + "A" * 40 + " cert=" + "B" * 70 + " iat-mode=0"}))
+ok(opts(C)["bridges"] == 1, "bridge line parsed")
+C.configure(json.dumps({"bridges": ""}))
+ok(opts(C)["bridges"] == 0, "bridges cleared")
+
+# ---- closed mode + shared secret over real connections
+E1 = ab.Bridge(os.path.join(TMP, "e1"), os.path.join(TMP, "e1_dl"), burner=True)
+E2 = ab.Bridge(os.path.join(TMP, "e2"), os.path.join(TMP, "e2_dl"), burner=True)
+p1, p2 = Pump(E1), Pump(E2)
+port3 = m.free_port()
+E1.configure(json.dumps({"closed": True}))
+E1.start_direct(port3)
+E2.connect("127.0.0.1:%d" % port3)
+time.sleep(2.5)
+ok(not p1.of("connected") and not p1.of("confirm"), "closed mode: unknown peer is refused without any prompt")
+E1.configure(json.dumps({"allow": E2.node.my_fp}))
+E2.connect("127.0.0.1:%d" % port3)
+ok(wait(lambda: p1.of("connected")), "closed mode: allowlisted fingerprint connects")
+ok(not p1.of("confirm"), "closed mode: no fingerprint prompt for allowlisted peer")
+
+F1 = ab.Bridge(os.path.join(TMP, "f1"), os.path.join(TMP, "f1_dl"), burner=True)
+F2 = ab.Bridge(os.path.join(TMP, "f2"), os.path.join(TMP, "f2_dl"), burner=True)
+F3 = ab.Bridge(os.path.join(TMP, "f3"), os.path.join(TMP, "f3_dl"), burner=True)
+q1, q2, q3 = Pump(F1), Pump(F2), Pump(F3)
+port4 = m.free_port()
+F1.configure(json.dumps({"psk": "a long shared secret"}))
+ok(opts(F1)["psk"], "shared secret is set")
+F1.start_direct(port4)
+F2.configure(json.dumps({"psk": "a long shared secret"}))
+F2.connect("127.0.0.1:%d" % port4)
+ok(wait(lambda: q1.of("connected") and q2.of("connected"), 30), "matching shared secret connects")
+F3.configure(json.dumps({"psk": "wrong secret"}))
+F3.connect("127.0.0.1:%d" % port4)
+time.sleep(4)
+# XXpsk3 mixes the secret in the last message, so the listening side detects the mismatch and drops
+# the session; the connecting side may still reach its fingerprint prompt first.
+ok(F3.node.my_fp not in F1.node.chans, "wrong shared secret is refused by the listening side")
+ok(any("shared secret mismatch" in e["text"] for e in q1.of("sys")), "listener reports the shared secret mismatch")
+
+# ---- pause / resume / speed limit / folder transfer
+F1.configure(json.dumps({"speed_limit_kbs": 0}))
+F1.pause_transfers()
+ok(opts(F1)["paused"], "transfers can be paused")
+F1.resume_transfers()
+ok(not opts(F1)["paused"], "transfers can be resumed")
+folder = os.path.join(TMP, "mydir")
+os.makedirs(os.path.join(folder, "sub"))
+for name in ("a.txt", os.path.join("sub", "b.txt")):
+    with open(os.path.join(folder, name), "w") as f:
+        f.write("data " * 1000)
+F1.send_file(folder)
+ok(wait(lambda: q2.of("file"), 20) and q2.of("file")[-1]["ok"], "folder arrives as a clean zip")
+ok(q2.of("file")[-1]["path"].endswith(".zip"), "received folder is a .zip")
+ok(isinstance(json.loads(F1.queue()), list), "queue() returns JSON")
+
+# ---- moat helpers are wired (network is not touched: bad proxy fails fast)
+try:
+    ab.moat_captcha("obfs4", "127.0.0.1:1")
+    ok(False, "moat should have failed")
+except Exception as e:
+    ok(True, "moat_captcha raises on an unreachable proxy (%s)" % type(e).__name__)
+
+for pmp in (p1, p2, q1, q2, q3):
+    pmp.running = False
+for b in (E1, E2, F1, F2, F3):
+    b.shutdown()
+
 for p in (pa, pb, pc, pd):
     p.running = False
 for b in (A, B, C, D):
