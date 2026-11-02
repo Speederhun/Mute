@@ -1071,13 +1071,18 @@ class Node:
         done.wait(timeout)
         if not state["ok"]:
             problems = [ln.split("]", 1)[-1].strip() for ln in tail
-                        if "[warn]" in ln or "[err]" in ln][-3:]
+                        if ("[warn]" in ln or "[err]" in ln) and "Path for GeoIP" not in ln][-3:]
+            joined = " ".join(tail)
+            old = ("You should upgrade" in joined or "not supported by this version of Tor" in joined)
             try:
                 proc.terminate()
             except OSError:
                 pass
             why = "exited" if proc.poll() is not None else f"did not finish bootstrapping in {timeout}s"
-            raise RuntimeError(f"Tor {why}. " + " | ".join(problems))
+            hint = (f"\n>>> The Tor program Mute found is TOO OLD for the current Tor network: {tor_cmd}\n"
+                    ">>> Install the newest Tor Browser (torproject.org/download) and run the installer again,\n"
+                    ">>> or put a current tor.exe in a 'tor' folder next to Mute (it is used first)." if old else "")
+            raise RuntimeError(f"Tor {why}. " + " | ".join(problems) + hint)
 
     def start_tor(self, local_port):
         import stem.control
