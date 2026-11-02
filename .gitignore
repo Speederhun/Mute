@@ -9,3 +9,11 @@ known_peers.json
 tor/
 .venv/
 tor_path.txt
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/build/
+*.apk
+*.aab
+.idea/
