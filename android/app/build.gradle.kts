@@ -46,9 +46,16 @@ android {
     }
 }
 
-// Resolved now, at configuration time, so the lazily created copy task never touches project state.
-val muteSource: File = layout.projectDirectory.file("../../mute.py").asFile      // repo root
-val bridgeSource: File = layout.projectDirectory.dir("../python").asFile         // android/python
+// mute.py (repo root, used unchanged) and android/python (the bridge + bundled stem) are copied into one
+// source directory right here while the script is evaluated. No Gradle task is involved on purpose:
+// copy tasks and task-graph hooks run lazily, which is where "state lock" errors come from.
+val pythonSrcDir: File = layout.buildDirectory.dir("mute-python").get().asFile
+pythonSrcDir.deleteRecursively()
+pythonSrcDir.mkdirs()
+layout.projectDirectory.file("../../mute.py").asFile.copyTo(File(pythonSrcDir, "mute.py"), overwrite = true)
+layout.projectDirectory.dir("../python").asFile.copyRecursively(pythonSrcDir, overwrite = true)
+pythonSrcDir.walkTopDown().filter { it.isDirectory && it.name == "__pycache__" }.toList()
+    .forEach { it.deleteRecursively() }
 
 chaquopy {
     defaultConfig {
@@ -62,21 +69,9 @@ chaquopy {
     }
     sourceSets {
         getByName("main") {
-            srcDir(layout.buildDirectory.dir("mute-python"))
+            srcDir(pythonSrcDir)
         }
     }
-}
-
-// mute.py (repo root) is used unchanged; android/python holds only the bridge.
-val syncMutePython = tasks.register<Copy>("syncMutePython") {
-    from(muteSource)
-    from(bridgeSource) { exclude("__pycache__/**") }
-    into(layout.buildDirectory.dir("mute-python"))
-}
-tasks.named("preBuild") { dependsOn(syncMutePython) }
-// Chaquopy's merge/requirements tasks read the copied sources: tell Gradle they must run after the copy.
-tasks.configureEach {
-    if (name != "syncMutePython" && name.contains("Python")) dependsOn(syncMutePython)
 }
 
 dependencies {
