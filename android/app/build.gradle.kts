@@ -46,8 +46,7 @@ android {
     }
 }
 
-// Resolved now, at configuration time: Chaquopy evaluates the pip block later, where project state is off limits.
-val wheelsDir: String = layout.projectDirectory.dir("../wheels").asFile.absolutePath
+// Resolved now, at configuration time, so the lazily created copy task never touches project state.
 val muteSource: File = layout.projectDirectory.file("../../mute.py").asFile      // repo root
 val bridgeSource: File = layout.projectDirectory.dir("../python").asFile         // android/python
 
@@ -55,11 +54,9 @@ chaquopy {
     defaultConfig {
         version = "3.12"
         pip {
-            // stem is published on PyPI as a source archive only; Chaquopy needs wheels, so one is kept in android/wheels.
-            options("--find-links", wheelsDir)
+            // stem is not installed from PyPI (it has no wheel): its source ships in android/python/stem.
             install("cryptography>=42")
             install("noiseprotocol>=0.3.1")
-            install("stem>=1.8")
             install("PySocks>=1.7")
         }
     }

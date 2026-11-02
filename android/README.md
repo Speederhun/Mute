@@ -68,5 +68,5 @@ and `lib<name>.so` for the transports). The Python side is covered by `tests/tes
 
 ## Third-party notes
 
-`android/wheels/stem-1.8.2-py3-none-any.whl` is the unmodified `stem` release (LGPLv3, licence text inside the wheel).
-It is kept here because PyPI only publishes `stem` as a source archive and Chaquopy installs wheels only.
+`android/python/stem/` is the unmodified `stem` 1.8.2 source (LGPLv3, licence in `stem/LICENSE`). It is bundled because
+PyPI only publishes `stem` as a source archive and Chaquopy installs wheels only.
