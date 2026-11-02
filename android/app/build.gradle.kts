@@ -1,3 +1,5 @@
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.zip.ZipFile
 
 plugins {
@@ -94,7 +96,7 @@ run {
                     zip.getInputStream(e).use { input -> out.outputStream().use { input.copyTo(it) } }
                     // report the ELF segment alignment (Android 15 on 16 KB devices wants 0x4000 or more)
                     try {
-                        val h = out.readBytes().let { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN) }
+                        val h = out.readBytes().let { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN) }
                         if (h.getInt(0) == 0x464c457f && h.get(4).toInt() == 2) {
                             val phoff = h.getLong(32).toInt(); val phentsize = h.getShort(54).toInt(); val phnum = h.getShort(56).toInt()
                             var align = 0L
