@@ -93,6 +93,16 @@ def _patch_tor_lookup(tor_cmd, pt_dir):
                     p = os.path.join(pt_dir, cand)
                     if os.path.isfile(p):
                         return p
+            # the packaged name may differ (libsnowflake.so, liblyrebird.so ...): match on the key word
+            try:
+                files = sorted(os.listdir(pt_dir))
+            except OSError:
+                return None
+            for n in binary_names:
+                key = n.split("-")[0].lower()
+                for f in files:
+                    if key in f.lower() and f.lower().endswith(".so"):
+                        return os.path.join(pt_dir, f)
             return None
         mute.find_pt = find_pt
 

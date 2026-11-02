@@ -57,6 +57,52 @@ layout.projectDirectory.dir("../python").asFile.copyRecursively(pythonSrcDir, ov
 pythonSrcDir.walkTopDown().filter { it.isDirectory && it.name == "__pycache__" }.toList()
     .forEach { it.deleteRecursively() }
 
+// Briar publishes tor, obfs4proxy and snowflake as plain JARs that carry the executables. Android Gradle does not turn
+// native files inside a JAR into jniLibs, so they are unpacked here into <abi>/lib<name>.so and added as a jniLibs
+// source. That puts them in the app's native library directory, the only place Android 10+ lets an app run a
+// program from. Done at configuration time (like the python copy above) to avoid task-graph hooks.
+val torJniDir: File = layout.buildDirectory.dir("tor-jni").get().asFile
+run {
+    torJniDir.deleteRecursively()
+    torJniDir.mkdirs()
+    val abis = setOf("arm64-v8a", "x86_64", "armeabi-v7a", "x86")
+    val listing = StringBuilder()
+    for ((prop, artifact) in listOf(
+        "torAndroidVersion" to "tor-android",
+        "obfs4ProxyAndroidVersion" to "obfs4proxy-android",
+        "snowflakeAndroidVersion" to "snowflake-android",
+    )) {
+        val ver = providers.gradleProperty(prop).get()
+        val cfg = configurations.detachedConfiguration(dependencies.create("org.briarproject:$artifact:$ver"))
+        cfg.isTransitive = false
+        for (file in cfg.resolve()) {
+            listing.append("== ").append(file.name).append('\n')
+            java.util.zip.ZipFile(file).use { zip ->
+                for (e in zip.entries()) {
+                    if (e.isDirectory || e.name.endsWith(".class") || e.name.startsWith("META-INF/")) continue
+                    listing.append(e.name).append('\n')
+                    val parts = e.name.split('/')
+                    val abi = parts.firstOrNull { it in abis } ?: continue
+                    if (abi !in setOf("arm64-v8a", "x86_64")) continue
+                    var base = parts.last()
+                    if (!base.startsWith("lib")) base = "lib$base"
+                    if (!base.endsWith(".so")) base = "$base.so"
+                    val out = File(torJniDir, "$abi/$base")
+                    out.parentFile.mkdirs()
+                    zip.getInputStream(e).use { input -> out.outputStream().use { input.copyTo(it) } }
+                }
+            }
+        }
+    }
+    File(torJniDir, "LISTING.txt").writeText(listing.toString())
+    if (!File(torJniDir, "arm64-v8a/libtor.so").exists()) {
+        throw GradleException(
+            "Could not find the Tor executable for arm64-v8a inside the Briar jars. Please send this list to the developer:\n" +
+                listing.lines().take(80).joinToString("\n")
+        )
+    }
+}
+
 chaquopy {
     defaultConfig {
         version = "3.12"
@@ -74,14 +120,9 @@ chaquopy {
     }
 }
 
-dependencies {
-    val torVer = providers.gradleProperty("torAndroidVersion").get()
-    val obfsVer = providers.gradleProperty("obfs4ProxyAndroidVersion").get()
-    val snowVer = providers.gradleProperty("snowflakeAndroidVersion").get()
-    implementation("org.briarproject:tor-android:$torVer")
-    implementation("org.briarproject:obfs4proxy-android:$obfsVer")
-    implementation("org.briarproject:snowflake-android:$snowVer")
+android.sourceSets.getByName("main").jniLibs.srcDir(torJniDir)
 
+dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.activity:activity-compose:1.9.3")

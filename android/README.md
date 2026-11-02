@@ -25,7 +25,7 @@ gradle wrapper          # once, if gradle/wrapper is missing (or just open the f
 ./gradlew assembleDebug # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Tor comes from Briar's Android builds (`org.briarproject:tor-android`, `obfs4proxy-android`, `snowflake-android`).
+Tor comes from Briar's JARs (`org.briarproject:tor-android`, `obfs4proxy-android`, `snowflake-android`); the build unpacks the executables from them into `app/build/tor-jni` (jniLibs).
 They are executables packaged as `lib*.so`; the app starts them as child processes exactly like the desktop version
 does. Versions are set in `gradle.properties` (`+` = newest; pin them after the first good build).
 
