@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -77,7 +79,7 @@ run {
         cfg.isTransitive = false
         for (file in cfg.resolve()) {
             listing.append("== ").append(file.name).append('\n')
-            java.util.zip.ZipFile(file).use { zip ->
+            ZipFile(file).use { zip ->
                 for (e in zip.entries()) {
                     if (e.isDirectory || e.name.endsWith(".class") || e.name.startsWith("META-INF/")) continue
                     listing.append(e.name).append('\n')
