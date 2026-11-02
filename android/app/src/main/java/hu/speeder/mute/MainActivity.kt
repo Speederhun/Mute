@@ -26,7 +26,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -331,18 +333,39 @@ private fun ChatBody(s: UiState, onOptions: () -> Unit) {
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.red),
                 ) { Text("PANIC") }
             }
+            Spacer(Modifier.height(6.dp))
+            Text("SEND THIS TO YOUR PEER", fontSize = 11.sp, letterSpacing = 1.sp, color = theme.acc, fontWeight = FontWeight.SemiBold)
             SelectionContainer {
-                Column {
-                    Text("words: ${s.words}", fontFamily = Mono, fontSize = 13.sp)
-                    Text("fp: ${s.fp}", fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
-                    if (myAddress.isNotEmpty()) Text("addr: $myAddress", fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
+                Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text("Address", fontSize = 11.sp, color = theme.dim)
+                    if (myAddress.isNotEmpty()) {
+                        Text(myAddress, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
+                    } else {
+                        Text(
+                            if (s.transport == "tor") "Waiting for Tor to publish your .onion address..."
+                            else "No network address found. Connect to Wi-Fi or mobile data.",
+                            fontSize = 13.sp, color = theme.red,
+                        )
+                    }
+                    if (s.transport != "tor" && s.ips.size > 1) {
+                        Text("other: " + s.ips.drop(1).joinToString("  ") { "$it:5555" }, fontFamily = Mono, fontSize = 11.sp, color = theme.dim)
+                    }
+                    Text("Verification words", fontSize = 11.sp, color = theme.dim)
+                    Text(s.words, fontFamily = Mono, fontSize = 13.sp, color = theme.fg)
+                    Text("Fingerprint", fontSize = 11.sp, color = theme.dim)
+                    Text(s.fp, fontFamily = Mono, fontSize = 11.sp, color = theme.fg)
                 }
             }
-            Row {
-                TextButton(onClick = { MuteController.copy(ctx, "fingerprint", s.fp) }) { Text("Copy fp") }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (myAddress.isNotEmpty()) {
+                    Button(onClick = {
+                        val text = "Mute address: $myAddress\nWords: ${s.words}\nFingerprint: ${s.fp}"
+                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                        ctx.startActivity(Intent.createChooser(send, "Send to your peer").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }) { Text("SHARE") }
                     TextButton(onClick = { MuteController.copy(ctx, "address", myAddress) }) { Text("Copy address") }
                 }
+                TextButton(onClick = { MuteController.copy(ctx, "fingerprint", s.fp) }) { Text("Copy fp") }
             }
         }
 
