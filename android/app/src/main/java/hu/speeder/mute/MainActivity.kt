@@ -467,8 +467,28 @@ private fun ConnectTab(s: UiState, theme: ThemeColors) {
     ) {
         SectionCard(theme, "CONNECT TO SOMEONE") {
             OutlinedTextField(
-                value = addr, onValueChange = { addr = it }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                value = addr,
+                onValueChange = { v ->
+                    // a whole shared message ("Mute address: ...\nFingerprint: ...") may be pasted: pick the parts out
+                    if (v.contains('\n') || v.contains(' ') || v.contains("address", ignoreCase = true)) {
+                        val (a, f) = parseShared(v)
+                        addr = a
+                        if (f.isNotEmpty()) peerFp = f
+                    } else addr = v.trim()
+                },
+                singleLine = true, shape = RoundedCornerShape(14.dp),
                 label = { Text(if (s.transport == "tor") "Their .onion address[:port]" else "Their host[:port]") },
+                trailingIcon = {
+                    TextButton(onClick = {
+                        val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(ctx)?.toString().orEmpty()
+                        if (text.isNotBlank()) {
+                            val (a, f) = parseShared(text)
+                            addr = a
+                            if (f.isNotEmpty()) peerFp = f
+                        }
+                    }) { Text("PASTE") }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
@@ -520,6 +540,24 @@ private fun ConnectTab(s: UiState, theme: ThemeColors) {
         }
         Spacer(Modifier.height(8.dp))
     }
+}
+
+/** Pulls the address and (if present) the fingerprint out of pasted text, e.g. the message made by the SHARE button. */
+private fun parseShared(text: String): Pair<String, String> {
+    var addr = ""
+    var fp = ""
+    for (raw in text.lines()) {
+        val line = raw.trim()
+        when {
+            line.startsWith("Mute address:", ignoreCase = true) -> addr = line.substringAfter(':').trim()
+            line.startsWith("Fingerprint:", ignoreCase = true) -> fp = line.substringAfter(':').trim()
+        }
+    }
+    if (addr.isEmpty()) {
+        val onion = Regex("[a-z2-7]{16,56}\\.onion(:\\d{1,5})?", RegexOption.IGNORE_CASE).find(text)?.value
+        addr = onion ?: text.trim().lineSequence().firstOrNull().orEmpty().trim().split(Regex("\\s+")).lastOrNull().orEmpty()
+    }
+    return addr.replace(" ", "") to fp
 }
 
 // ---- Files tab
