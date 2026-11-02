@@ -70,7 +70,22 @@ def moat_builtin(proxy=""):
 def _patch_tor_lookup(tor_cmd, pt_dir):
     """Android cannot search PATH for tor: the binaries live in the app's native library dir."""
     if tor_cmd:
-        mute.find_tor = lambda: tor_cmd if os.path.isfile(tor_cmd) else None
+        def find_tor():
+            if os.path.isfile(tor_cmd):
+                return tor_cmd
+            # the packaged file may be named differently: take any native lib that looks like tor itself
+            d = pt_dir or os.path.dirname(tor_cmd)
+            try:
+                for n in sorted(os.listdir(d)):
+                    low = n.lower()
+                    if "tor" in low and not any(x in low for x in ("obfs", "snow", "lyrebird", "conjure", "webtunnel")):
+                        if os.path.isfile(os.path.join(d, n)) and not low.startswith(("libtorch", "libstore")):
+                            return os.path.join(d, n)
+            except OSError:
+                pass
+            return None
+        mute.find_tor = find_tor
+        mute._native_dir = pt_dir or os.path.dirname(tor_cmd)
     if pt_dir:
         def find_pt(binary_names, _tor_cmd=None):
             for n in binary_names:
@@ -193,6 +208,14 @@ class Bridge:
         if bridges_text and bridges_text.strip():
             self.node.set_bridges(bridges_text)
         lp = mute.free_port()
+        if mute.find_tor() is None:
+            d = getattr(mute, "_native_dir", "")
+            try:
+                files = ", ".join(sorted(os.listdir(d))) if d else "?"
+            except OSError as e:
+                files = str(e)
+            raise RuntimeError("The Tor binary is not inside the app (libtor.so missing). "
+                               "Native library folder %s contains: %s" % (d, files))
         self.node.start_tor(lp)
         self.node.listen(lp, local_only=True)
         return self.state()
