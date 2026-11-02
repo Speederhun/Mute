@@ -70,6 +70,10 @@ val syncMutePython = tasks.register<Copy>("syncMutePython") {
     into(layout.buildDirectory.dir("mute-python"))
 }
 tasks.named("preBuild") { dependsOn(syncMutePython) }
+// Chaquopy's merge/requirements tasks read the copied sources: tell Gradle they must run after the copy.
+tasks.configureEach {
+    if (name != "syncMutePython" && name.contains("Python")) dependsOn(syncMutePython)
+}
 
 dependencies {
     val torVer = providers.gradleProperty("torAndroidVersion").get()
