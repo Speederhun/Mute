@@ -132,7 +132,7 @@ object MuteController {
                     },
                 )
                 val saved = try { File(dataDir(app), "theme.txt").readText().trim() } catch (_: Exception) { "" }
-                themes[saved]?.let { _theme.value = it }
+                (themes[saved] ?: themes["ice"])?.let { _theme.value = it }
             } catch (_: Exception) {
                 // keep the built-in hacker theme; the app still works
             }

@@ -42,21 +42,21 @@ private val Mono = FontFamily.Monospace
 fun SectionTitle(text: String) {
     Column(Modifier.padding(top = 8.dp)) {
         HorizontalDivider(color = MaterialTheme.colorScheme.outline)
-        Text(text.uppercase(), fontFamily = Mono, fontSize = 13.sp, color = MaterialTheme.colorScheme.secondary,
+        Text(text.uppercase(), fontSize = 13.sp, color = MaterialTheme.colorScheme.secondary,
             modifier = Modifier.padding(top = 6.dp))
     }
 }
 
 @Composable
 fun Hint(text: String) {
-    Text(text, fontFamily = Mono, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+    Text(text, fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
 }
 
 @Composable
 fun SwitchRow(label: String, checked: Boolean, hint: String? = null, onChange: (Boolean) -> Unit) {
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, Modifier.weight(1f), fontFamily = Mono, fontSize = 14.sp)
+            Text(label, Modifier.weight(1f), fontSize = 14.sp)
             Switch(checked = checked, onCheckedChange = onChange)
         }
         if (hint != null) Hint(hint)
@@ -78,7 +78,7 @@ fun IntField(label: String, value: Int, onValue: (Int) -> Unit) {
 fun <T> ChipRow(items: List<Pair<String, T>>, selected: T, onSelect: (T) -> Unit) {
     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         items.forEach { (label, value) ->
-            FilterChip(selected = value == selected, onClick = { onSelect(value) }, label = { Text(label, fontFamily = Mono, fontSize = 12.sp) })
+            FilterChip(selected = value == selected, onClick = { onSelect(value) }, label = { Text(label, fontSize = 12.sp) })
         }
     }
 }
@@ -126,7 +126,7 @@ fun OptionsPanel(
             } else {
                 OutlinedButton(onClick = { MuteController.newClientAuth() }) { Text("Create onion client key") }
                 state?.options?.clientAuthPub?.let { pub ->
-                    Text(pub, fontFamily = Mono, fontSize = 11.sp)
+                    Text(pub, fontSize = 11.sp)
                     Hint("Give this PUBLIC key to the owner of the onion service you want to reach. It must be on their list before they start.")
                     OutlinedButton(onClick = { MuteController.copy(ctx, "onion client key", pub) }) { Text("Copy key") }
                 }
@@ -144,7 +144,7 @@ fun OptionsPanel(
             ChipRow(meta.coverProfiles.keys.map { it to it }, opts.coverProfile) { onOpts(opts.copy(coverProfile = it)) }
             meta.coverProfiles[opts.coverProfile]?.let { (text, estimate) -> Hint("$text - $estimate") }
         }
-        Text("Constant-rate traffic", fontFamily = Mono, fontSize = 14.sp)
+        Text("Constant-rate traffic", fontSize = 14.sp)
         ChipRow(meta.shapeLabels, opts.shape) { onOpts(opts.copy(shape = it)) }
         Hint(
             if (opts.shape > 0f) MuteController.shapeEstimate(opts.shape, tor)
@@ -186,7 +186,7 @@ fun OptionsPanel(
             singleLine = true, label = { Text("Lock password (empty = Unlock button only)") },
             visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
         )
-        Text("Theme", fontFamily = Mono, fontSize = 14.sp)
+        Text("Theme", fontSize = 14.sp)
         ChipRow(meta.themes.keys.map { it to it }, theme.name) { MuteController.setTheme(it, saveTheme) }
     }
 }
@@ -217,7 +217,7 @@ private fun BridgesBlock(opts: Options, onOpts: (Options) -> Unit) {
         }
     }
     if (moat.busy) Hint("Asking the Tor Project...")
-    moat.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontFamily = Mono, fontSize = 12.sp) }
+    moat.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
     moat.image?.let { bytes ->
         val bmp = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }
         if (bmp != null) {

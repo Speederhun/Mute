@@ -13,7 +13,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -147,13 +153,37 @@ private fun SetupScreen(s: UiState) {
         Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("MUTE", fontFamily = Mono, fontSize = 28.sp)
-        Text("Serverless end-to-end encrypted chat and file transfer.", color = MaterialTheme.colorScheme.outline, fontFamily = Mono)
+        Text("MUTE", fontSize = 34.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+        Text(
+            "Serverless end-to-end encrypted chat and file transfer.",
+            color = MaterialTheme.colorScheme.outline, fontSize = 14.sp,
+        )
 
+        Text("1. Choose connection", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            ModeCard(
+                title = "DIRECT", subtitle = "Plain TCP, port 5555.\nLAN, port forward or VPN.",
+                selected = !tor, modifier = Modifier.weight(1f),
+            ) { tor = false }
+            ModeCard(
+                title = "TOR", subtitle = "Onion address.\nHides both IP addresses.",
+                selected = tor, modifier = Modifier.weight(1f),
+            ) { tor = true }
+        }
+        if (tor) {
+            Text(
+                "Tor starts when you press START (up to a minute). Bridges and proxy: Options > Tor bridges. " +
+                    "After start you get your .onion address; to reach someone, type their .onion address in the chat screen.",
+                color = MaterialTheme.colorScheme.outline, fontSize = 12.sp,
+            )
+        }
+
+        Text("2. Identity", fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
         SwitchRow("Burner identity (random key, nothing saved)", burner) { burner = it }
         if (!burner) {
             OutlinedTextField(
                 value = pass, onValueChange = { pass = it }, singleLine = true,
+                shape = RoundedCornerShape(14.dp),
                 label = {
                     Text(
                         when (idState) {
@@ -169,14 +199,7 @@ private fun SetupScreen(s: UiState) {
             )
         }
 
-        SwitchRow("Tor mode (onion address, hides both IPs)", tor) { tor = it }
-        if (tor) {
-            Text("Starting Tor can take up to a minute.", color = MaterialTheme.colorScheme.outline, fontFamily = Mono, fontSize = 12.sp)
-        } else {
-            Text("DIRECT: plain TCP on port 5555 (LAN, port forward or VPN).", color = MaterialTheme.colorScheme.outline, fontFamily = Mono, fontSize = 12.sp)
-        }
-
-        OutlinedButton(onClick = { showOptions = !showOptions }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(onClick = { showOptions = !showOptions }, shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
             Text(if (showOptions) "Hide options" else "Options")
         }
         if (showOptions) {
@@ -201,8 +224,27 @@ private fun SetupScreen(s: UiState) {
                 }
             },
             enabled = !s.busy && (!needsPass || pass.isNotEmpty()),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text(if (s.busy) "Starting..." else "START") }
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        ) { Text(if (s.busy) "Starting..." else if (tor) "START TOR" else "START DIRECT", fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+private fun ModeCard(title: String, subtitle: String, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(16.dp)
+    val accent = MaterialTheme.colorScheme.secondary
+    Column(
+        modifier
+            .clip(shape)
+            .background(if (selected) accent.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surface)
+            .border(BorderStroke(if (selected) 2.dp else 1.dp, if (selected) accent else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)), shape)
+            .clickable(onClick = onClick)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(title, fontWeight = FontWeight.Bold, fontSize = 20.sp, color = if (selected) accent else MaterialTheme.colorScheme.onSurface)
+        Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
     }
 }
 
