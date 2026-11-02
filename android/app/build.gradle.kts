@@ -16,7 +16,8 @@ android {
         versionCode = 1
         versionName = "1.2.1"
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            // Chaquopy 17 ships Python 3.12 only for these two ABIs (no 32-bit ARM).
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
 
