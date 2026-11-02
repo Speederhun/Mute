@@ -70,6 +70,9 @@ import java.util.Locale
 
 private val Mono = FontFamily.Monospace
 
+/** The start-up animation plays once per process (not again after rotation). */
+private var introPlayed = false
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -114,7 +117,9 @@ private fun MuteRoot() {
 private fun MuteApp() {
     val s by MuteController.ui.collectAsStateWithLifecycle()
     val locked by MuteController.locked.collectAsStateWithLifecycle()
+    var intro by remember { mutableStateOf(!introPlayed && !s.started) }
     if (s.started) ChatScreen(s) else SetupScreen(s)
+    if (intro) IntroScreen { introPlayed = true; intro = false }
     // while locked nothing may be shown - a pending fingerprint prompt waits (it times out after 3 minutes)
     if (!locked) s.confirm?.let { ConfirmDialog(it) }
     if (locked) LockScreen()
