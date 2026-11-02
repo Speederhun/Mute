@@ -48,6 +48,8 @@ android {
 
 // Resolved now, at configuration time: Chaquopy evaluates the pip block later, where project state is off limits.
 val wheelsDir: String = layout.projectDirectory.dir("../wheels").asFile.absolutePath
+val muteSource: File = layout.projectDirectory.file("../../mute.py").asFile      // repo root
+val bridgeSource: File = layout.projectDirectory.dir("../python").asFile         // android/python
 
 chaquopy {
     defaultConfig {
@@ -70,8 +72,8 @@ chaquopy {
 
 // mute.py (repo root) is used unchanged; android/python holds only the bridge.
 val syncMutePython = tasks.register<Copy>("syncMutePython") {
-    from(rootProject.file("../mute.py"))
-    from(rootProject.file("python")) { exclude("__pycache__/**") }
+    from(muteSource)
+    from(bridgeSource) { exclude("__pycache__/**") }
     into(layout.buildDirectory.dir("mute-python"))
 }
 tasks.named("preBuild") { dependsOn(syncMutePython) }
