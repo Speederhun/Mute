@@ -286,6 +286,13 @@ private fun ChatScreen(s: UiState) {
                 )
             }
             TextButton(onClick = { MuteController.lock() }) { Text("LOCK") }
+            // STOP ends the session (connection, Tor, chat) and returns to the start screen; the app stays open.
+            TextButton(
+                onClick = {
+                    MuteController.shutdown()
+                    ctx.startService(Intent(ctx, MuteService::class.java).setAction(MuteService.ACTION_STOP))
+                },
+            ) { Text("STOP") }
             TextButton(
                 onClick = {
                     MuteController.shutdown()
@@ -564,6 +571,14 @@ private fun SettingsTab(s: UiState) {
                 Text("WIPE CHAT")
             }
         }
+        val ctx = LocalContext.current
+        OutlinedButton(
+            onClick = {
+                MuteController.shutdown()
+                ctx.startService(Intent(ctx, MuteService::class.java).setAction(MuteService.ACTION_STOP))
+            },
+            shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth(),
+        ) { Text("STOP SESSION (back to start screen)") }
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             OptionsPanel(
                 opts = opts, onOpts = { opts = it },
