@@ -65,3 +65,8 @@ name are written to the app's private storage.
 Not yet verified on a device: the Gradle build, the Kotlin sources (they have not been compiled), the Chaquopy wheel for
 `cryptography>=42`, and the exact file names of the Briar binaries in `nativeLibraryDir` (the bridge looks for `libtor.so`
 and `lib<name>.so` for the transports). The Python side is covered by `tests/test_android_bridge.py`.
+
+## Third-party notes
+
+`android/wheels/stem-1.8.2-py3-none-any.whl` is the unmodified `stem` release (LGPLv3, licence text inside the wheel).
+It is kept here because PyPI only publishes `stem` as a source archive and Chaquopy installs wheels only.

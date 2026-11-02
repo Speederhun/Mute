@@ -50,6 +50,8 @@ chaquopy {
     defaultConfig {
         version = "3.12"
         pip {
+            // stem is published on PyPI as a source archive only; Chaquopy needs wheels, so one is kept in android/wheels.
+            options("--find-links", rootProject.file("wheels").absolutePath)
             install("cryptography>=42")
             install("noiseprotocol>=0.3.1")
             install("stem>=1.8")
