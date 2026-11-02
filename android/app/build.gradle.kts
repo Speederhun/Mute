@@ -46,12 +46,15 @@ android {
     }
 }
 
+// Resolved now, at configuration time: Chaquopy evaluates the pip block later, where project state is off limits.
+val wheelsDir: String = layout.projectDirectory.dir("../wheels").asFile.absolutePath
+
 chaquopy {
     defaultConfig {
         version = "3.12"
         pip {
             // stem is published on PyPI as a source archive only; Chaquopy needs wheels, so one is kept in android/wheels.
-            options("--find-links", rootProject.file("wheels").absolutePath)
+            options("--find-links", wheelsDir)
             install("cryptography>=42")
             install("noiseprotocol>=0.3.1")
             install("stem>=1.8")
