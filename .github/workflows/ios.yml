@@ -32,3 +32,33 @@ jobs:
         with:
           name: ios-build-log
           path: ios/build.log
+
+  ios-ipa:
+    # Unsigned device build packed as an .ipa: install it on an iPhone with Sideloadly or AltStore (they sign it with your Apple ID).
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: brew install xcodegen cocoapods
+      - name: Set up project
+        working-directory: ios
+        run: ./setup.sh
+      - name: Build for devices
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -workspace Mute.xcworkspace -scheme Mute -sdk iphoneos -configuration Release \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build.log | tail -n 100
+      - name: Pack the .ipa
+        working-directory: ios
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Mute.app Payload/
+          zip -qry Mute-ios-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mute-ios-unsigned
+          path: ios/Mute-ios-unsigned.ipa
