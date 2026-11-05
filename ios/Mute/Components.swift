@@ -81,7 +81,7 @@ struct ChipRow<T: Hashable>: View {
 }
 
 /// All options of the desktop Options window that apply before and during a session.
-/// (Tor bridges, the Moat captcha and onion client keys need an iOS transport library and come in a later round.)
+/// (obfs4/snowflake bridges and the Moat captcha need a transport library that the iOS app does not include.)
 struct OptionsForm: View {
     @EnvironmentObject var ctl: MuteController
     let tor: Bool
@@ -97,6 +97,19 @@ struct OptionsForm: View {
                 SecureField("Shared secret (both sides must enter the same)", text: $ctl.opts.psk)
                     .textFieldStyle(.roundedBorder)
                 Hint("Stops man-in-the-middle even if the fingerprint check is skipped. Use a long passphrase.")
+            }
+
+            if tor && !ctl.started {
+                SectionCard(title: "TOR") {
+                    TextField("Plain bridges, one per line (IP:port fingerprint)", text: $ctl.opts.bridges, axis: .vertical)
+                        .lineLimit(2...6).textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Hint("Hide that you use Tor. obfs4, snowflake and the Tor Project's bridge captcha are not available on iOS (no transport library): only plain bridges work.")
+                    TextField("Onion client keys that may reach you (52 characters each, one per line)", text: $ctl.opts.allowedClients, axis: .vertical)
+                        .lineLimit(2...5).textFieldStyle(.roundedBorder)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Hint("With keys listed, only their holders can even find your onion service.")
+                }
             }
 
             SectionCard(title: "GROUP CHAT") {

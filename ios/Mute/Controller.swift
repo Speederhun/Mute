@@ -327,7 +327,8 @@ final class MuteController: ObservableObject {
         options = OptionsState(
             closed: op.bool("closed"), relay: op.bool("relay"), cover: op.bool("cover"),
             shape: op.dbl("shape"), paused: op.bool("paused"), psk: op.bool("psk"),
-            amnesia: op.bool("amnesia"), known: op.int("known")
+            amnesia: op.bool("amnesia"), known: op.int("known"),
+            clientAuthPub: op["client_auth_pub"] as? String, bridges: op.int("bridges")
         )
     }
 
@@ -404,6 +405,18 @@ final class MuteController: ObservableObject {
                 await MainActor.run { self?.refreshState() }
             } catch {
                 await MainActor.run { self?.addLine(who: "", text: "Options: \(error.localizedDescription)", kind: .sys) }
+            }
+        }
+    }
+
+    /// Creates an onion client key pair; the public part appears in options.clientAuthPub (give it to the service owner).
+    func newClientAuth() {
+        Task.detached { [weak self] in
+            do {
+                try Py.call("configure", [jsonString(["new_client_auth": true])])
+                await MainActor.run { self?.refreshState() }
+            } catch {
+                await MainActor.run { self?.addLine(who: "", text: "Client key: \(error.localizedDescription)", kind: .sys) }
             }
         }
     }

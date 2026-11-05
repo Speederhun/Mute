@@ -48,6 +48,8 @@ struct OptionsState {
     var psk = false
     var amnesia = false
     var known = 0
+    var clientAuthPub: String? = nil
+    var bridges = 0
 }
 
 /// Everything the Python node can be configured with (Bridge.configure in android_bridge.py).
@@ -64,6 +66,8 @@ struct Options: Equatable {
     var proxy = ""            // SOCKS5 host:port for DIRECT connections
     var scrub = true          // strip metadata from outgoing files
     var amnesia = false
+    var bridges = ""          // plain Tor bridge lines, start only
+    var allowedClients = ""   // onion client keys, start only
 
     /// JSON for Bridge.configure: everything on the first call (prev == nil), afterwards only what changed.
     func json(prev: Options?) -> [String: Any] {
@@ -83,6 +87,10 @@ struct Options: Equatable {
         if first || speedLimitKbs != prev!.speedLimitKbs { o["speed_limit_kbs"] = speedLimitKbs }
         if first || ratchet != prev!.ratchet { o["ratchet"] = ratchet }
         if first || proxy != prev!.proxy { o["proxy"] = proxy.trimmingCharacters(in: .whitespaces) }
+        if first {
+            if !bridges.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { o["bridges"] = bridges }
+            if !allowedClients.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { o["allowed_clients"] = allowedClients }
+        }
         return o
     }
 }

@@ -1155,6 +1155,13 @@ class Node:
         self.controller = stem.control.Controller.from_port(port=int(ctrl_port))
         self.controller.authenticate()
         self.emit("sys", "Using the Tor built into the app")
+        if self.bridges:
+            pts = sorted({t for _, t in self.bridges if t})
+            if pts:
+                raise RuntimeError("This app has no obfs4/snowflake support: " + ", ".join(pts)
+                                   + " bridges cannot be used here. Plain bridges (IP:port fingerprint) work.")
+            self.controller.set_options({"UseBridges": "1", "Bridge": [b[0] for b in self.bridges]})
+            self.emit("sys", f"Using {len(self.bridges)} bridge(s)")
         self._wait_bootstrap()
         self._publish_onion(local_port)
 

@@ -320,6 +320,7 @@ requirements.lock   pinned dependencies with hashes (pip install --require-hashe
 SECURITY.md         how to report problems, what is and is not tested
 windows/ linux/ macos/   per-platform guides and build scripts
 android/            Android app (Chaquopy + Jetpack Compose); runs mute.py unchanged
+ios/                iOS app (SwiftUI + embedded Python, build on a Mac; see ios/README.md)
 tests/              scrubbing, loopback network/crypto, fuzz tests
 docs/               screenshots
 .github/            CI (test matrix, security checks, per-platform builds) and Dependabot

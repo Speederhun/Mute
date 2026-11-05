@@ -218,6 +218,7 @@ class _FakeCtl:
         return _types.SimpleNamespace(service_id="a" * 56)
     def close(self): pass
     def get_info(self, key, default=None): return 'NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="Done"'
+    def set_options(self, opts): _FakeCtl.opts = opts
     def msg(self, cmd): raise AssertionError("unexpected control command")
 _sc.Controller.from_port = staticmethod(lambda port=None, **kw: _FakeCtl())
 T = ab.Bridge(os.path.join(TMP, "t"), os.path.join(TMP, "t_dl"), burner=True)
@@ -225,6 +226,19 @@ st = json.loads(T.start_tor_external(9050, 9051))
 ok(st["transport"] == "tor" and st["onion"] == "a" * 56 + ".onion:5555", "start_tor_external publishes the onion through the app's Tor")
 ok(T.node.socks_port == 9050, "start_tor_external uses the app's SOCKS port")
 T.shutdown()
+T2 = ab.Bridge(os.path.join(TMP, "t2"), os.path.join(TMP, "t2_dl"), burner=True)
+T2.configure(json.dumps({"bridges": "1.2.3.4:443 " + "A" * 40}))
+T2.start_tor_external(9050, 9051)
+ok(_FakeCtl.opts["UseBridges"] == "1" and len(_FakeCtl.opts["Bridge"]) == 1, "plain bridges are applied to the app's Tor")
+T2.shutdown()
+T3 = ab.Bridge(os.path.join(TMP, "t3"), os.path.join(TMP, "t3_dl"), burner=True)
+T3.configure(json.dumps({"bridges": "obfs4 1.2.3.4:443 " + "A" * 40 + " cert=x iat-mode=0"}))
+try:
+    T3.start_tor_external(9050, 9051)
+    ok(False, "obfs4 bridges are refused on iOS")
+except RuntimeError as e:
+    ok("obfs4" in str(e), "obfs4 bridges are refused on iOS with a clear message")
+T3.shutdown()
 _sc.Controller.from_port = _real_from_port
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ios", "python"))
