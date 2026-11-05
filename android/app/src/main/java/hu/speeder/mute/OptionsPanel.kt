@@ -17,6 +17,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,6 +61,19 @@ fun SwitchRow(label: String, checked: Boolean, hint: String? = null, onChange: (
             Switch(checked = checked, onCheckedChange = onChange)
         }
         if (hint != null) Hint(hint)
+    }
+}
+
+/** A labelled slider; [onChange] runs while dragging (save = false) and once more when the finger lifts (save = true). */
+@Composable
+fun SliderRow(label: String, value: Int, range: IntRange, onChange: (Int, Boolean) -> Unit) {
+    Column {
+        Text("$label: $value%", fontSize = 14.sp)
+        Slider(
+            value = value.toFloat(), valueRange = range.first.toFloat()..range.last.toFloat(),
+            onValueChange = { onChange(it.toInt(), false) },
+            onValueChangeFinished = { onChange(value, true) },
+        )
     }
 }
 
@@ -173,6 +187,22 @@ fun OptionsPanel(
         if (tor && !started) {
             SectionTitle("Tor bridges")
             BridgesBlock(opts, onOpts)
+        }
+
+        if (started && state != null) {
+            val a = state.audio
+            SectionTitle("Voice calls and sounds")
+            SliderRow("Call volume", a.volume, 0..200) { v, save -> MuteController.setAudio(a.copy(volume = v), save) }
+            SliderRow("Microphone gain", a.micGain, 0..300) { v, save -> MuteController.setAudio(a.copy(micGain = v), save) }
+            SwitchRow("Push to talk", a.ptt, "A big hold-to-talk button replaces Mute: the microphone only transmits while you press it.") {
+                MuteController.setAudio(a.copy(ptt = it))
+            }
+            SwitchRow("Sounds", a.sounds, "Short tones for new messages, connected peers, received files and calls (ringing, connected, ended).") {
+                MuteController.setAudio(a.copy(sounds = it))
+            }
+            SliderRow("Sound volume", a.soundVolume, 0..100) { v, save -> MuteController.setAudio(a.copy(soundVolume = v), save) }
+            OutlinedButton(onClick = { MuteController.testSound() }) { Text("Test sound") }
+            Hint("During a call the phone's volume keys change the call volume.")
         }
 
         SectionTitle("App")

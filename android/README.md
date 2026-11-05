@@ -40,6 +40,9 @@ once, tap Install. Needs Android 7.0+ on a 64-bit phone.
 Tap the phone button next to a connected peer in the Chat tab. The other side (another phone or the desktop app)
 sees an incoming call and can accept or decline. During a call you can mute, switch to the loudspeaker
 (the microphone is then muted while the other side talks, so the phone does not echo) and hang up.
+**Push to talk**: switch it on in the call panel or in Settings; a big **HOLD TO TALK** button then replaces Mute and the microphone only
+transmits while you press it. **Volume**: a slider in the call panel (and the phone's volume keys during a call), plus microphone gain in Settings.
+**Sounds**: short tones for messages, new peers, files and calls (with a ringtone for incoming calls); Settings switches them off or changes their volume.
 Calls use the same end-to-end encrypted channel as the chat. The app asks for the microphone permission the first
 time, and keeps the microphone open in the background while a call runs (a foreground service of type
 "microphone"). Phones always use the ADPCM codec, which every desktop build also speaks. Audio is handled by

@@ -200,6 +200,11 @@ the microphone is only opened after you start or accept a call. During a call th
 - **Echo**: use a headset. Without one, Options > voice calls > *speakerphone mode* mutes your microphone while the other side talks (half-duplex, no echo, but you cannot interrupt).
 - **Over Tor** expect about half a second of delay (Mute buffers more to avoid stutter); over DIRECT/VPN it feels like a normal call.
 - Choose microphone and speaker in Options > voice calls. Needs the `sounddevice` package (installed automatically; Linux needs PortAudio, `install.sh` adds it). macOS asks for microphone permission on the first call.
+- **Push to talk**: Options > voice calls > *push to talk* adds a **hold to talk** button to the call bar (and a talk key, default `F8`, choose another in Options; it works while the Mute window has the focus).
+  The microphone only transmits while you hold it. Like muting, this does not change the traffic pattern, and the other side does not see you as "muted". On Android it is a big button in the call panel.
+- **Volume**: a *vol* slider in the call bar, plus *call volume* and *microphone gain* in Options (0-200 % / 0-300 %). Settings are kept in `audio.json` (nothing is saved in burner or amnesia mode).
+- **Sounds**: short tones for a new message, a connected peer, a received file and for calls (ringing, ringback, connected, ended). Options > sounds switches them off or changes their volume.
+  Windows plays them with `winsound`; macOS uses `afplay`; Linux uses `paplay`, `pw-play` or `aplay` (whatever is installed), otherwise the window bell.
 - Terminal: `/call [peer]`, `/accept`, `/reject`, `/hangup`, `/mute`.
 
 **Honest limits:** the hearing quality, devices and echo on real hardware have not been tried by the author (the tests use a simulated sound card), calls are one-to-one (no group calls),

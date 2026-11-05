@@ -46,6 +46,12 @@ data class CallUi(
     val speaker: Boolean = false, val since: Long = 0L,
 )
 
+/** Voice and sound settings (stored by the Python side in audio.json). */
+data class AudioPrefs(
+    val sounds: Boolean = true, val soundVolume: Int = 70,
+    val volume: Int = 100, val micGain: Int = 100, val ptt: Boolean = false,
+)
+
 data class Transfer(val label: String, val done: Long, val total: Long)
 
 data class UiState(
@@ -67,6 +73,7 @@ data class UiState(
     val transfer: Transfer? = null,
     val namePrompt: Peer? = null,
     val call: CallUi? = null,
+    val audio: AudioPrefs = AudioPrefs(),
 )
 
 /**
@@ -198,6 +205,7 @@ object MuteController {
                 startPolling(b)
                 _ui.update { it.copy(started = true) }
                 applyState(b.callAttr("state").toString())
+                loadAudioPrefs(b.callAttr("audio_prefs").toString())
                 b.callAttr("configure", opts.toJson(null))
                 applied = opts
                 val st = if (tor) b.callAttr("start_tor") else b.callAttr("start_direct", DIRECT_PORT)
@@ -273,13 +281,20 @@ object MuteController {
     private fun handle(ev: JSONObject, b: PyObject) {
         when (ev.getString("k")) {
             "sys" -> addLine("", ev.getString("text"), Kind.SYS)
-            "msg" -> addLine(ev.getString("name"), ev.getString("text"), Kind.PEER, colorOf(ev.getString("fp")))
-            "relayed" -> addLine(
-                ev.getString("name"), ev.getString("text"),
-                Kind.PEER, colorOf(ev.getString("fp")), via = ev.getString("via"),
-            )
+            "msg" -> {
+                addLine(ev.getString("name"), ev.getString("text"), Kind.PEER, colorOf(ev.getString("fp")))
+                Sounds.play(Sounds.Kind.MESSAGE)
+            }
+            "relayed" -> {
+                addLine(
+                    ev.getString("name"), ev.getString("text"),
+                    Kind.PEER, colorOf(ev.getString("fp")), via = ev.getString("via"),
+                )
+                Sounds.play(Sounds.Kind.MESSAGE)
+            }
             "connected" -> {
                 addLine("", "${ev.getString("name")} connected securely", Kind.SYS)
+                Sounds.play(Sounds.Kind.PEER)
                 applyState(b.callAttr("state").toString())
                 // offer to give the new peer a name right away (only you see it, and a relay hub passes it on)
                 val fp = ev.getString("fp")
@@ -293,6 +308,7 @@ object MuteController {
                 val name = File(ev.getString("path")).name
                 val text = if (ev.getBoolean("ok")) "File received: $name" else "DAMAGED file: $name"
                 addLine("", text, Kind.FILE)
+                Sounds.play(if (ev.getBoolean("ok")) Sounds.Kind.FILE else Sounds.Kind.ERROR)
             }
             "progress" -> {
                 val total = ev.getLong("total")
@@ -329,9 +345,15 @@ object MuteController {
             "incoming" -> {
                 _ui.update { it.copy(call = CallUi("incoming", fp, name)) }
                 notifyIncoming()
+                if (::app.isInitialized) Sounds.ring(app)
             }
-            "ringing" -> _ui.update { it.copy(call = CallUi("ringing", fp, name)) }
+            "ringing" -> {
+                _ui.update { it.copy(call = CallUi("ringing", fp, name)) }
+                Sounds.ringback()
+            }
             "active" -> {
+                Sounds.stopRing()
+                Sounds.play(Sounds.Kind.CONNECTED)
                 clearIncomingNotification()
                 _ui.update { st ->
                     st.copy(call = (st.call ?: CallUi("active", fp, name)).copy(state = "active", since = System.currentTimeMillis()))
@@ -340,6 +362,8 @@ object MuteController {
             }
             "remote-mute" -> _ui.update { st -> st.copy(call = st.call?.copy(remoteMuted = detail == "1")) }
             else -> {                                   // the call is over, whatever the reason
+                Sounds.stopRing()
+                Sounds.play(if (state == "error") Sounds.Kind.ERROR else Sounds.Kind.ENDED)
                 clearIncomingNotification()
                 val secs = _ui.value.call?.takeIf { it.state == "active" }?.let { (System.currentTimeMillis() - it.since) / 1000 }
                 val text = if (state == "error") "Call failed: $detail" else (callEnd[state] ?: "Call ended")
@@ -369,7 +393,9 @@ object MuteController {
         try {
             val nm = app.getSystemService(NotificationManager::class.java)
             if (Build.VERSION.SDK_INT >= 26) {
-                nm.createNotificationChannel(NotificationChannel(CALL_CHANNEL, "Calls", NotificationManager.IMPORTANCE_HIGH))
+                nm.createNotificationChannel(
+                    NotificationChannel(CALL_CHANNEL, "Calls", NotificationManager.IMPORTANCE_HIGH).apply { setSound(null, null) },
+                )
             }
             val open = PendingIntent.getActivity(
                 app, 2, Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
@@ -394,6 +420,44 @@ object MuteController {
         if (!::app.isInitialized) return
         try { app.getSystemService(NotificationManager::class.java).cancel(CALL_NOTIFICATION_ID) } catch (_: Exception) {}
     }
+
+    private fun loadAudioPrefs(json: String) {
+        val o = JSONObject(json)
+        val p = AudioPrefs(
+            sounds = o.getBoolean("sounds"), soundVolume = o.getInt("sound_volume"),
+            volume = o.getInt("volume"), micGain = o.getInt("mic_gain"), ptt = o.getBoolean("ptt"),
+        )
+        Sounds.enabled = p.sounds
+        Sounds.volume = p.soundVolume
+        _ui.update { it.copy(audio = p) }
+    }
+
+    /** Changes voice / sound settings: applied at once; saved by the Python side when [save] is set (never in burner / amnesia mode). Sliders pass save=false while dragging. */
+    fun setAudio(p: AudioPrefs, save: Boolean = true) {
+        Sounds.enabled = p.sounds
+        Sounds.volume = p.soundVolume
+        _ui.update { it.copy(audio = p) }
+        val b = bridge ?: return
+        pool.execute {
+            try {
+                b.callAttr(
+                    "set_audio_prefs",
+                    JSONObject().put("sounds", p.sounds).put("sound_volume", p.soundVolume)
+                        .put("volume", p.volume).put("mic_gain", p.micGain).put("ptt", p.ptt).toString(),
+                    save,
+                )
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Push to talk: true while the talk button is held down. */
+    fun ptt(down: Boolean) {
+        val b = bridge ?: return
+        try { b.callAttr("call_ptt", down) } catch (_: Exception) {}
+    }
+
+    fun testSound() = Sounds.play(Sounds.Kind.MESSAGE)
 
     /** The Activity reports the result of the microphone permission request. */
     fun setMicPermission(granted: Boolean) { call("set_mic_permission", granted) }
@@ -670,6 +734,7 @@ object MuteController {
         _ui.value = UiState()
         synchronized(peerColors) { peerColors.clear() }
         CallAudio.stop()
+        Sounds.stopRing()
         clearIncomingNotification()
         if (::app.isInitialized) MuteService.microphone(app, false)
         if (b == null) return

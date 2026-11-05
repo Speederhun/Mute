@@ -327,7 +327,7 @@ private fun ChatScreen(s: UiState) {
             ) { Text("PANIC") }
         }
 
-        s.call?.let { CallPanel(it, theme, withMic) }
+        s.call?.let { CallPanel(it, s.audio, theme, withMic) }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {

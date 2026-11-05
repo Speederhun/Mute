@@ -142,6 +142,7 @@ class Bridge:
                               app_dir=app_dir, scrub=scrub, burner=burner)
         self.node.calls.backend_factory = self._make_audio
         self.node.calls.codecs_override = ["adpcm"]   # no libopus in the app: ADPCM works with every desktop build
+        self._apply_audio_prefs(mute.load_audio_prefs())
         self.node.emit("sys", "Fingerprint " + self.node.my_fp)
 
     # ---- identity / state
@@ -299,6 +300,35 @@ class Bridge:
 
     def set_mic_permission(self, ok):
         self._mic_ok = bool(ok)
+
+    def _apply_audio_prefs(self, p):
+        c = self.node.calls
+        c.volume = p["volume"] / 100.0
+        c.mic_gain = p["mic_gain"] / 100.0
+        c.set_ptt(p["ptt"])
+
+    def audio_prefs(self):
+        """Voice and sound settings (same audio.json the desktop app uses) as JSON."""
+        return json.dumps(mute.load_audio_prefs())
+
+    def set_audio_prefs(self, prefs_json, save=True):
+        """Applies (and saves, unless burner / amnesia) any subset of: sounds, sound_volume, volume, mic_gain, ptt, ptt_key."""
+        p = mute.load_audio_prefs()
+        new = json.loads(prefs_json)
+        for k, v in new.items():
+            if k in p and type(v) is type(p[k]):
+                p[k] = v
+        p["volume"] = max(0, min(300, p["volume"]))
+        p["mic_gain"] = max(0, min(300, p["mic_gain"]))
+        p["sound_volume"] = max(0, min(100, p["sound_volume"]))
+        self._apply_audio_prefs(p)
+        if save and not (self.node.burner or self.node.amnesia):
+            mute.save_audio_prefs(p)
+        return json.dumps(p)
+
+    def call_ptt(self, down):
+        """Push to talk: True while the talk button is held."""
+        self.node.calls.ptt_press(bool(down))
 
     def call_peer(self, fp):
         self.node.calls.call(fp)

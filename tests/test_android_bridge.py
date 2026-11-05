@@ -347,6 +347,19 @@ A.call_peer(fp_b)
 ok(wait(lambda: B.node.calls.state == "ringing-in"), "second call rings")
 B.call_reject()
 ok(wait(lambda: any(e["state"] == "rejected" for e in pa.of("call"))), "reject reaches the caller")
+# push to talk, volume and sound preferences through the bridge
+ok(json.loads(A.audio_prefs())["sounds"] is True, "audio prefs are readable")
+A.set_audio_prefs(json.dumps({"ptt": True, "volume": 150, "mic_gain": 80, "sound_volume": 40, "junk": 1, "sounds": "x"}))
+cp = json.loads(A.audio_prefs())
+ok(cp["ptt"] is True and cp["volume"] == 150 and cp["sound_volume"] == 40 and cp["sounds"] is True, "audio prefs are applied, saved and validated")
+ok(A.node.calls.ptt and abs(A.node.calls.volume - 1.5) < 1e-9 and abs(A.node.calls.mic_gain - 0.8) < 1e-9, "prefs reach the call manager")
+A.call_ptt(True)
+ok(A.node.calls.ptt_down is True, "call_ptt presses the talk key")
+A.call_ptt(False)
+A.set_audio_prefs(json.dumps({"volume": 9999}))
+ok(json.loads(A.audio_prefs())["volume"] == 300, "volume is clamped")
+ok(os.path.exists(os.path.join(m.APP_DIR, "audio.json")), "prefs are stored next to the identity")
+A.set_audio_prefs(json.dumps({"ptt": False, "volume": 100}))
 fka.running = fkb.running = False
 
 for p in (pa, pb, pc, pd):
