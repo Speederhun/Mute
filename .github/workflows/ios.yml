@@ -1,0 +1,34 @@
+name: ios-build
+
+# Compiles the iOS app for the simulator (no signing) so build errors show up in the log.
+on:
+  workflow_dispatch:
+  push:
+    paths: ["ios/**", "mute.py", "android/python/**", ".github/workflows/ios.yml"]
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tools
+        run: brew install xcodegen cocoapods
+      - name: Set up project (Python runtime, wheels, xcodegen, pods)
+        working-directory: ios
+        run: ./setup.sh
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild -workspace Mute.xcworkspace -scheme Mute -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | tail -n 200
+      - name: Keep the build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: ios/build.log
