@@ -190,6 +190,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: android-actions/setup-android@v3
+        with:
+          packages: ''          # the old default 'tools' package no longer exists; Gradle fetches what it needs
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
