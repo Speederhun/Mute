@@ -82,7 +82,8 @@ jobs:
         shell: bash
         run: git archive --format=zip --prefix=Mute/ -o dist/Mute-windows-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md assets windows
       - name: Attest build provenance (release runs only)
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && !github.event.repository.private   # attestations need a public repo (or a paid plan)
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -122,7 +123,8 @@ jobs:
       - name: Installer pack (installs only missing packages, never upgrades the system)
         run: git archive --format=tar.gz --prefix=Mute/ -o dist/Mute-linux-installer.tar.gz HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md assets linux
       - name: Attest build provenance (release runs only)
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && !github.event.repository.private   # attestations need a public repo (or a paid plan)
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -160,7 +162,8 @@ jobs:
       - name: Installer pack (Homebrew based)
         run: git archive --format=zip --prefix=Mute/ -o dist/Mute-macos-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md assets macos
       - name: Attest build provenance (release runs only)
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && !github.event.repository.private   # attestations need a public repo (or a paid plan)
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -218,7 +221,8 @@ jobs:
           cp app/build/outputs/apk/release/*.apk ../dist/Mute-android.apk
           ls -l ../dist
       - name: Attest build provenance (release runs only)
-        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        if: (startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && !github.event.repository.private   # attestations need a public repo (or a paid plan)
+        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/Mute-android.apk
