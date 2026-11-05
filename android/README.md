@@ -35,6 +35,17 @@ Every `android-vX.Y.Z` release on the repository's Releases page carries `Mute-a
 with build provenance and `SHA256SUMS-android.txt`). On the phone: download the APK, open it, allow "install from this source"
 once, tap Install. Needs Android 7.0+ on a 64-bit phone.
 
+## Voice calls
+
+Tap the phone button next to a connected peer in the Chat tab. The other side (another phone or the desktop app)
+sees an incoming call and can accept or decline. During a call you can mute, switch to the loudspeaker
+(the microphone is then muted while the other side talks, so the phone does not echo) and hang up.
+Calls use the same end-to-end encrypted channel as the chat. The app asks for the microphone permission the first
+time, and keeps the microphone open in the background while a call runs (a foreground service of type
+"microphone"). Phones always use the ADPCM codec, which every desktop build also speaks. Audio is handled by
+`CallAudio.kt` (AudioRecord / AudioTrack with echo cancellation where the phone has it); encoding, jitter
+buffer and signalling are the unchanged `CallManager` in `mute.py`.
+
 ## Make a release (maintainers)
 
 ```bash

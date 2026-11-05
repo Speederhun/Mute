@@ -9,6 +9,7 @@ mute.py itself is used unchanged: this module only
 All methods are safe to call from any thread, but start_tor() blocks for up to a minute,
 so Kotlin must call it from a background thread.
 """
+import array
 import base64
 import json
 import os
@@ -107,6 +108,23 @@ def _patch_tor_lookup(tor_cmd, pt_dir):
         mute.find_pt = find_pt
 
 
+class _AndroidAudio:
+    """Audio backend for mute.CallManager. Kotlin owns AudioRecord/AudioTrack and moves the samples:
+    it pushes microphone blocks with Bridge.audio_in() and pulls playback blocks with Bridge.audio_out();
+    this object only tells Kotlin when to start and stop (events 'audio' start / stop)."""
+
+    def __init__(self, bridge):
+        self.bridge = bridge
+
+    def start(self, on_mic, pull_out):
+        self.bridge._audio = (on_mic, pull_out)
+        self.bridge.node.emit("audio", "start")
+
+    def stop(self):
+        self.bridge._audio = None
+        self.bridge.node.emit("audio", "stop")
+
+
 class Bridge:
     def __init__(self, app_dir, download_dir, tor_cmd=None, pt_dir=None,
                  passphrase=None, burner=False, scrub=True, amnesia=False):
@@ -118,8 +136,12 @@ class Bridge:
         self._confirm_lock = threading.Lock()
         self._pending = {}  # fp -> {"ev": Event, "ok": bool}
         self._client_auth_pub = None
+        self._audio = None
+        self._mic_ok = False
         self.node = mute.Node(self._confirm_cb, passphrase or None, amnesia=bool(amnesia),
                               app_dir=app_dir, scrub=scrub, burner=burner)
+        self.node.calls.backend_factory = self._make_audio
+        self.node.calls.codecs_override = ["adpcm"]   # no libopus in the app: ADPCM works with every desktop build
         self.node.emit("sys", "Fingerprint " + self.node.my_fp)
 
     # ---- identity / state
@@ -269,6 +291,52 @@ class Bridge:
     def cancel_transfers(self):
         return self.node.cancel_transfer("all")
 
+    # ---- voice calls
+    def _make_audio(self, in_dev=None, out_dev=None):
+        if not self._mic_ok:
+            raise mute.AudioUnavailable("Microphone permission is missing. Allow it for Mute in the Android settings.")
+        return _AndroidAudio(self)
+
+    def set_mic_permission(self, ok):
+        self._mic_ok = bool(ok)
+
+    def call_peer(self, fp):
+        self.node.calls.call(fp)
+
+    def call_accept(self):
+        self.node.calls.accept()
+
+    def call_reject(self):
+        self.node.calls.reject()
+
+    def call_hangup(self):
+        self.node.calls.hangup()
+
+    def call_mute(self, on):
+        self.node.calls.set_muted(bool(on))
+
+    def call_duck(self, on):
+        """Speakerphone mode: the microphone is muted while the other side talks (no echo)."""
+        self.node.calls.duck = bool(on)
+
+    def call_info(self):
+        c = self.node.calls
+        st = c.stats() or {}
+        return json.dumps({"state": c.state, "peer": c.peer, "muted": c.muted, "remote_muted": c.remote_muted,
+                           "seconds": st.get("seconds", 0), "level_in": st.get("level_in", 0),
+                           "level_out": st.get("level_out", 0), "codec": c.codec})
+
+    def audio_in(self, samples):
+        """Kotlin -> Python: one microphone block (320 samples, 16-bit little endian, as a Java byte[])."""
+        a = self._audio
+        if a:
+            a[0](array.array("b", samples).tobytes())
+
+    def audio_out(self):
+        """Python -> Kotlin: one playback block (bytes; silence when no call is running)."""
+        a = self._audio
+        return a[1]() if a else bytes(mute.CHUNK_BYTES)
+
     # ---- events -> JSON for Kotlin
     def poll(self, timeout_ms=500):
         """Blocks up to timeout_ms for the next event, then returns every queued event as a JSON array."""
@@ -311,6 +379,12 @@ class Bridge:
             return {"k": "queue", "items": [list(i) for i in n.queue_info()]}
         if k == "confirm":
             return {"k": "confirm", "fp": a[0], "words": mute.fp_words(a[0])}
+        if k == "call":
+            fp = a[1] or ""
+            return {"k": "call", "state": a[0], "fp": fp, "name": n.label(fp) if fp else "",
+                    "detail": a[2] if len(a) > 2 else ""}
+        if k == "audio":
+            return {"k": "audio", "action": a[0]}
         return None
 
     def shutdown(self):

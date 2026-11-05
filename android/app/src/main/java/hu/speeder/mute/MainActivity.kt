@@ -275,6 +275,23 @@ private fun ChatScreen(s: UiState) {
     val theme by MuteController.theme.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(Tab.CHAT) }
     var renaming by remember { mutableStateOf<Peer?>(null) }
+    // voice calls need the microphone: ask once, then run the pending action
+    var pendingMic by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        MuteController.setMicPermission(granted)
+        val action = pendingMic
+        pendingMic = null
+        if (granted) action?.invoke() else MuteController.micDenied()
+    }
+    val withMic: (() -> Unit) -> Unit = { action ->
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            MuteController.setMicPermission(true)
+            action()
+        } else {
+            pendingMic = action
+            micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     // a freshly connected peer: ask for a nickname straight away
     LaunchedEffect(s.namePrompt) {
         s.namePrompt?.let { renaming = it; MuteController.dismissNamePrompt() }
@@ -310,9 +327,14 @@ private fun ChatScreen(s: UiState) {
             ) { Text("PANIC") }
         }
 
+        s.call?.let { CallPanel(it, theme, withMic) }
+
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
-                Tab.CHAT -> ChatTab(s, theme, onConnect = { tab = Tab.CONNECT }, onRename = { renaming = it })
+                Tab.CHAT -> ChatTab(
+                    s, theme, onConnect = { tab = Tab.CONNECT }, onRename = { renaming = it },
+                    onCall = { p -> withMic { MuteController.startCall(p.fp) } },
+                )
                 Tab.CONNECT -> ConnectTab(s, theme)
                 Tab.FILES -> FilesTab(s, theme)
                 Tab.SETTINGS -> SettingsTab(s)
@@ -355,7 +377,7 @@ private fun ChatScreen(s: UiState) {
 
 // ---- Chat tab: peers, bubbles, big message bar
 @Composable
-private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit, onRename: (Peer) -> Unit) {
+private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit, onRename: (Peer) -> Unit, onCall: (Peer) -> Unit) {
     val ctx = LocalContext.current
     var input by remember { mutableStateOf("") }
     var attachMenu by remember { mutableStateOf(false) }
@@ -381,6 +403,10 @@ private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit, onRen
                         onClick = { onRename(p) }, shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.peerColor(p.color)),
                     ) { Text("●  " + p.name) }
+                    OutlinedButton(
+                        onClick = { onCall(p) }, enabled = s.call == null, shape = RoundedCornerShape(20.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = theme.peerColor(p.color)),
+                    ) { Text("📞") }
                 }
             }
         }

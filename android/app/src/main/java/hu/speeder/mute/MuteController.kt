@@ -3,13 +3,18 @@ package hu.speeder.mute
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.provider.OpenableColumns
+import androidx.core.app.NotificationCompat
 import androidx.documentfile.provider.DocumentFile
 import com.chaquo.python.PyObject
 import com.chaquo.python.Python
@@ -34,6 +39,13 @@ data class ChatLine(
 
 data class Confirm(val fp: String, val words: String)
 
+/** A voice call in progress. state: incoming | ringing | active */
+data class CallUi(
+    val state: String, val fp: String, val name: String,
+    val muted: Boolean = false, val remoteMuted: Boolean = false,
+    val speaker: Boolean = false, val since: Long = 0L,
+)
+
 data class Transfer(val label: String, val done: Long, val total: Long)
 
 data class UiState(
@@ -54,6 +66,7 @@ data class UiState(
     val confirm: Confirm? = null,
     val transfer: Transfer? = null,
     val namePrompt: Peer? = null,
+    val call: CallUi? = null,
 )
 
 /**
@@ -67,6 +80,7 @@ object MuteController {
     private const val DIRECT_PORT = 5555
     private const val MAX_LINES = 500
     private const val CLIPBOARD_CLEAR_MS = 30_000L
+    private const val CALL_NOTIFICATION_ID = 2
 
     private val pool = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
@@ -297,7 +311,115 @@ object MuteController {
                 applyState(b.callAttr("state").toString())
             }
             "confirm" -> _ui.update { it.copy(confirm = Confirm(ev.getString("fp"), ev.getString("words"))) }
+            "call" -> onCallEvent(ev.getString("state"), ev.getString("fp"), ev.getString("name"), ev.optString("detail"))
+            "audio" -> onAudioEvent(ev.getString("action"), b)
         }
+    }
+
+    // ---- voice calls
+    private const val CALL_CHANNEL = "mute_calls"
+    private val callEnd = mapOf(
+        "rejected" to "Call declined", "busy" to "Busy - the other side is already in a call",
+        "noanswer" to "No answer", "missed" to "Missed call", "ended" to "Call ended",
+        "ended-remote" to "Call ended by the other side",
+    )
+
+    private fun onCallEvent(state: String, fp: String, name: String, detail: String) {
+        when (state) {
+            "incoming" -> {
+                _ui.update { it.copy(call = CallUi("incoming", fp, name)) }
+                notifyIncoming()
+            }
+            "ringing" -> _ui.update { it.copy(call = CallUi("ringing", fp, name)) }
+            "active" -> {
+                clearIncomingNotification()
+                _ui.update { st ->
+                    st.copy(call = (st.call ?: CallUi("active", fp, name)).copy(state = "active", since = System.currentTimeMillis()))
+                }
+                if (::app.isInitialized) MuteService.microphone(app, true)
+            }
+            "remote-mute" -> _ui.update { st -> st.copy(call = st.call?.copy(remoteMuted = detail == "1")) }
+            else -> {                                   // the call is over, whatever the reason
+                clearIncomingNotification()
+                val secs = _ui.value.call?.takeIf { it.state == "active" }?.let { (System.currentTimeMillis() - it.since) / 1000 }
+                val text = if (state == "error") "Call failed: $detail" else (callEnd[state] ?: "Call ended")
+                addLine("", text + (if (secs != null) " (%d:%02d)".format(secs / 60, secs % 60) else "") +
+                    (if (name.isNotEmpty() && state == "missed") " from $name" else ""), Kind.SYS)
+                _ui.update { it.copy(call = null) }
+                if (::app.isInitialized) MuteService.microphone(app, false)
+            }
+        }
+    }
+
+    private fun onAudioEvent(action: String, b: PyObject) {
+        if (!::app.isInitialized) return
+        if (action == "start") {
+            val err = CallAudio.start(app, b, _ui.value.call?.speaker == true)
+            if (err != null) {
+                addLine("", "Audio error: $err", Kind.SYS)
+                call("call_hangup")
+            }
+        } else {
+            CallAudio.stop()
+        }
+    }
+
+    private fun notifyIncoming() {
+        if (!::app.isInitialized) return
+        try {
+            val nm = app.getSystemService(NotificationManager::class.java)
+            if (Build.VERSION.SDK_INT >= 26) {
+                nm.createNotificationChannel(NotificationChannel(CALL_CHANNEL, "Calls", NotificationManager.IMPORTANCE_HIGH))
+            }
+            val open = PendingIntent.getActivity(
+                app, 2, Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+            nm.notify(
+                CALL_NOTIFICATION_ID,
+                NotificationCompat.Builder(app, CALL_CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
+                    .setContentTitle("Incoming call")
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+                    .setContentIntent(open).setFullScreenIntent(open, true).setAutoCancel(true)
+                    .setTimeoutAfter(45_000).build(),
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun clearIncomingNotification() {
+        if (!::app.isInitialized) return
+        try { app.getSystemService(NotificationManager::class.java).cancel(CALL_NOTIFICATION_ID) } catch (_: Exception) {}
+    }
+
+    /** The Activity reports the result of the microphone permission request. */
+    fun setMicPermission(granted: Boolean) { call("set_mic_permission", granted) }
+
+    fun micDenied() {
+        addLine("", "Calls need the microphone permission (Android settings -> Apps -> Mute -> Permissions)", Kind.SYS)
+        if (_ui.value.call?.state == "incoming") call("call_reject")
+    }
+
+    fun startCall(fp: String) = call("call_peer", fp)
+    fun acceptCall() = call("call_accept")
+    fun rejectCall() = call("call_reject")
+    fun hangup() = call("call_hangup")
+
+    fun toggleMute() {
+        val c = _ui.value.call ?: return
+        _ui.update { it.copy(call = c.copy(muted = !c.muted)) }
+        call("call_mute", !c.muted)
+    }
+
+    /** Loudspeaker on: the microphone is muted while the other side talks, so the phone does not echo. */
+    fun toggleSpeaker() {
+        val c = _ui.value.call ?: return
+        _ui.update { it.copy(call = c.copy(speaker = !c.speaker)) }
+        CallAudio.setSpeaker(!c.speaker)
+        call("call_duck", !c.speaker)
     }
 
     private fun applyState(json: String) {
@@ -547,6 +669,9 @@ object MuteController {
         _locked.value = false
         _ui.value = UiState()
         synchronized(peerColors) { peerColors.clear() }
+        CallAudio.stop()
+        clearIncomingNotification()
+        if (::app.isInitialized) MuteService.microphone(app, false)
         if (b == null) return
         pool.execute {
             try { b.callAttr("shutdown") } catch (_: Exception) {}

@@ -266,6 +266,75 @@ for pmp in (p1, p2, q1, q2, q3):
 for b in (E1, E2, F1, F2, F3):
     b.shutdown()
 
+# ---- voice calls (the Kotlin audio threads are played by a small fake)
+import array as _array
+import math as _math
+
+
+class FakeKotlinAudio(threading.Thread):
+    """Plays AudioRecord/AudioTrack: pushes a tone as signed Java-style bytes, collects what is pulled."""
+
+    def __init__(self, bridge, pump, freq):
+        super().__init__(daemon=True)
+        self.b, self.pump, self.freq, self.heard, self.running = bridge, pump, freq, bytearray(), True
+        self.start()
+
+    def run(self):
+        n = 0
+        while self.running:
+            if len([e for e in self.pump.of("audio") if e["action"] == "start"]) > \
+               len([e for e in self.pump.of("audio") if e["action"] == "stop"]):
+                pcm = _array.array("h", (int(8000 * _math.sin(2 * _math.pi * self.freq * (n + i) / m.CALL_RATE))
+                                         for i in range(m.CHUNK_SAMPLES)))
+                n += m.CHUNK_SAMPLES
+                self.b.audio_in(list(_array.array("b", pcm.tobytes())))     # Java byte[] is a signed sequence
+                self.heard += self.b.audio_out()
+            time.sleep(0.02)
+
+
+def tone_power(pcm, freq):
+    a = _array.array("h", bytes(pcm[: len(pcm) // 2 * 2]))
+    re = sum(v * _math.cos(2 * _math.pi * freq * i / m.CALL_RATE) for i, v in enumerate(a))
+    im = sum(v * _math.sin(2 * _math.pi * freq * i / m.CALL_RATE) for i, v in enumerate(a))
+    return re * re + im * im
+
+
+fka, fkb = FakeKotlinAudio(A, pa, 600), FakeKotlinAudio(B, pb, 1100)
+fp_b = next(iter(A.node.chans))
+try:
+    A.call_peer(fp_b)
+    ok(False, "a call without microphone permission must be refused")
+except Exception as e:
+    ok("permission" in str(e).lower(), "call refused without microphone permission")
+A.set_mic_permission(True)
+B.set_mic_permission(True)
+A.call_peer(fp_b)
+ok(wait(lambda: any(e["state"] == "incoming" for e in pb.of("call"))), "B gets an incoming call event")
+ok(wait(lambda: any(e["state"] == "ringing" for e in pa.of("call"))), "A gets a ringing event")
+ok(pb.of("call")[0]["name"] != "", "call event carries the caller's name")
+B.call_accept()
+ok(wait(lambda: any(e["state"] == "active" for e in pa.of("call")) and any(e["state"] == "active" for e in pb.of("call"))),
+   "call becomes active on both sides")
+ok(wait(lambda: any(e["action"] == "start" for e in pa.of("audio")) and any(e["action"] == "start" for e in pb.of("audio"))),
+   "Kotlin is told to start the audio threads")
+ok(wait(lambda: len(fka.heard) > 32000 and len(fkb.heard) > 32000, 20), "audio flows both ways")
+ta, tb = bytes(fka.heard[-16000:]), bytes(fkb.heard[-16000:])
+ok(tone_power(tb, 600) > 20 * tone_power(tb, 1100), "B hears A's tone")
+ok(tone_power(ta, 1100) > 20 * tone_power(ta, 600), "A hears B's tone")
+info = json.loads(A.call_info())
+ok(info["state"] == "active" and info["codec"] == "adpcm", "call_info reports the running call (ADPCM)")
+A.call_mute(True)
+ok(wait(lambda: any(e["state"] == "remote-mute" for e in pb.of("call"))), "mute reaches the other side")
+A.call_hangup()
+ok(wait(lambda: any(e["state"] == "ended-remote" for e in pb.of("call"))), "hangup reaches the other side")
+ok(wait(lambda: len([e for e in pa.of("audio") if e["action"] == "stop"]) >= 1), "Kotlin is told to stop the audio")
+ok(json.loads(A.call_info())["state"] == "idle", "idle after the call")
+A.call_peer(fp_b)
+ok(wait(lambda: B.node.calls.state == "ringing-in"), "second call rings")
+B.call_reject()
+ok(wait(lambda: any(e["state"] == "rejected" for e in pa.of("call"))), "reject reaches the caller")
+fka.running = fkb.running = False
+
 for p in (pa, pb, pc, pd):
     p.running = False
 for b in (A, B, C, D):
