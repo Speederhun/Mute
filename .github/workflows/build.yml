@@ -37,6 +37,7 @@ jobs:
       - run: python tests/test_fuzz.py
       - run: python tests/test_themes.py
       - run: python tests/test_moat.py
+      - run: python tests/test_voice.py
       - name: Package installs and starts
         run: |
           pip install --no-deps .
@@ -74,7 +75,7 @@ jobs:
       - name: Build GUI and CLI executables
         shell: bash
         run: |
-          OPTS="--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise --collect-all tkinterdnd2"
+          OPTS="--onefile --hidden-import stem.control --hidden-import stem.process --hidden-import socks --collect-submodules noise --collect-all tkinterdnd2 --hidden-import sounddevice --hidden-import opuslib"
           python -m PyInstaller $OPTS --windowed --icon assets/mute.ico --name Mute mute.py
           python -m PyInstaller $OPTS --icon assets/mute.ico --name Mute-cli mute.py
       - name: Installer pack (no git needed - installs Python and Tor if missing)
@@ -115,7 +116,7 @@ jobs:
         run: |
           python -m PyInstaller --onefile --name Mute \
             --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
-            --collect-submodules noise --collect-all tkinterdnd2 mute.py
+            --collect-submodules noise --collect-all tkinterdnd2 --hidden-import sounddevice --hidden-import opuslib mute.py
           chmod +x dist/Mute
           tar -C dist -czf dist/Mute-linux.tar.gz Mute
       - name: Installer pack (installs only missing packages, never upgrades the system)
@@ -152,7 +153,9 @@ jobs:
         run: |
           python -m PyInstaller --windowed --icon assets/mute.icns --name Mute \
             --hidden-import stem.control --hidden-import stem.process --hidden-import socks \
-            --collect-submodules noise --collect-all tkinterdnd2 mute.py
+            --collect-submodules noise --collect-all tkinterdnd2 --hidden-import sounddevice --hidden-import opuslib mute.py
+          /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Mute uses the microphone only during a voice call you accept or start.'" dist/Mute.app/Contents/Info.plist
+          codesign --force --deep -s - dist/Mute.app
           ditto -c -k --sequesterRsrc --keepParent dist/Mute.app dist/Mute-macos.zip
       - name: Installer pack (Homebrew based)
         run: git archive --format=zip --prefix=Mute/ -o dist/Mute-macos-installer.zip HEAD mute.py requirements.txt requirements.lock pyproject.toml LICENSE README.md assets macos

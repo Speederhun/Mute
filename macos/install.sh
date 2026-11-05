@@ -53,6 +53,7 @@ if [ "$NOPKG" = 0 ]; then
   say "[2/5] Installing Python 3.12 with Tk, and Tor"
   run brew install python@3.12 python-tk@3.12 tor
   try brew install lyrebird
+  try brew install opus
   if [ "$DRY" = 0 ]; then PY="$(brew --prefix python@3.12)/bin/python3.12"; else PY=python3.12; fi
 else
   say "[1/5] Skipping Homebrew (--no-packages)"

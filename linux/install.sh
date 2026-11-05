@@ -91,6 +91,11 @@ if [ "$NOPKG" = 0 ]; then
           echo "database or mirrors your own way and run this again (or install the packages yourself and use --no-packages)."
           exit 1; }
       fi
+      # voice calls: sound I/O and the Opus codec (optional - calls still work without Opus)
+      for opt in portaudio opus; do
+        # shellcheck disable=SC2086
+        is_installed "$opt" || try $SUDO pacman -S --needed $YESFLAG_PACMAN "$opt"
+      done
       echo "   Bridges (obfs4/snowflake) need an extra program from the AUR, see linux/arch.md." ;;
     debian)
       MISS="$(missing python3 python3-venv python3-pip python3-tk tor)"
@@ -100,7 +105,7 @@ if [ "$NOPKG" = 0 ]; then
         # shellcheck disable=SC2086
         run $SUDO apt-get install --no-upgrade $YESFLAG_APT $MISS
       fi
-      for opt in lyrebird obfs4proxy snowflake-client; do
+      for opt in libportaudio2 libopus0 lyrebird obfs4proxy snowflake-client; do
         if ! is_installed "$opt"; then
           # shellcheck disable=SC2086
           try $SUDO apt-get install --no-upgrade $YESFLAG_APT "$opt"
@@ -110,11 +115,19 @@ if [ "$NOPKG" = 0 ]; then
       MISS="$(missing python3 python3-pip python3-tkinter tor)"
       # shellcheck disable=SC2086
       if [ -n "$MISS" ]; then run $SUDO dnf install $YESFLAG_DNF $MISS; else echo "   already installed."; fi
-      is_installed obfs4 || try $SUDO dnf install $YESFLAG_DNF obfs4 ;;
+      is_installed obfs4 || try $SUDO dnf install $YESFLAG_DNF obfs4
+      for opt in portaudio opus; do
+        # shellcheck disable=SC2086
+        is_installed "$opt" || try $SUDO dnf install $YESFLAG_DNF "$opt"
+      done ;;
     suse)
       MISS="$(missing python3 python3-pip python3-tk tor)"
       # shellcheck disable=SC2086
-      if [ -n "$MISS" ]; then run $SUDO zypper install $YESFLAG_ZYPPER $MISS; else echo "   already installed."; fi ;;
+      if [ -n "$MISS" ]; then run $SUDO zypper install $YESFLAG_ZYPPER $MISS; else echo "   already installed."; fi
+      for opt in portaudio libopus0; do
+        # shellcheck disable=SC2086
+        is_installed "$opt" || try $SUDO zypper install $YESFLAG_ZYPPER "$opt"
+      done ;;
   esac
 else
   say "[1/5] Skipping system packages (--no-packages)"

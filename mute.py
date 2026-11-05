@@ -17,6 +17,7 @@ Cryptography:
   * No logs, messages live in memory only
 """
 import base64
+import collections
 import hashlib
 import hmac
 import itertools
@@ -396,6 +397,23 @@ class Channel:
             self._put((typ, payload, after))
         else:
             self._send_raw(typ, payload, after)
+
+    def send_realtime(self, typ, payload):
+        """For audio: never waits. In constant-rate mode a packet that would sit in a long queue is
+        dropped instead (old audio is worthless). Returns False if dropped."""
+        if self.rate <= 0 or self._q is None:
+            self._send_raw(typ, payload)
+            return True
+        if self._q.qsize() > 3 or len(payload) > FRAG_DATA:
+            return False
+        with self._mid_lock:
+            self._mid = (self._mid + 1) & 0xFFFF
+            mid = self._mid
+        try:
+            self._q.put_nowait((T_FRAG, struct.pack(FRAG_HDR, typ, 1, mid) + payload, None))
+        except queue.Full:
+            return False
+        return True
 
     def send(self, typ, payload=b""):
         if self.rate <= 0:
@@ -895,6 +913,7 @@ class Node:
         self.speed_limit = 0              # bytes per second per peer, 0 = unlimited
         self.server = None
         self.stop_requested = threading.Event()
+        self.calls = CallManager(self)
         self.transport = "direct"
         self.socks_port = None
         self.onion = None
@@ -1379,6 +1398,10 @@ class Node:
                     self.emit("relayed", fp, origin, str(d.get("t", ""))[:4000])
                 elif typ == T_COVER:
                     pass  # dummy traffic
+                elif typ == T_CALL:
+                    self.calls.on_call(fp, chan, data)
+                elif typ == T_AUDIO:
+                    self.calls.on_audio(fp, data)
                 else:
                     raise ConnectionError("Unexpected frame")
         except Exception as e:
@@ -1393,6 +1416,7 @@ class Node:
                 chan.close()
             except OSError:
                 pass
+            self.calls.on_disconnect(fp)
             self.emit("disconnected", fp)
 
     # -- sending (to every connected peer)
@@ -1533,9 +1557,9 @@ class Node:
                         with open(p, "rb") as f:
                             f.seek(sent)
                             while not cancel.is_set():
-                                if self.paused.is_set():
-                                    while self.paused.is_set() and not cancel.is_set():
-                                        self.emit("progress", label + " (paused)", sent, size, 0)
+                                if self.paused.is_set() or self.calls.active():
+                                    while (self.paused.is_set() or self.calls.active()) and not cancel.is_set():
+                                        self.emit("progress", label + (" (paused during call)" if self.calls.active() else " (paused)"), sent, size, 0)
                                         time.sleep(0.3)
                                     start, t0 = sent, time.time()   # speed is measured from here again
                                 if cancel.is_set():
@@ -1584,6 +1608,7 @@ class Node:
         """Stops listening, disconnects every peer and shuts Tor down, so START can be used again
         (also with another mode). Works while Tor is still starting up."""
         self.stop_requested.set()
+        self.calls.hangup()
         for ch in list(self.chans.values()):
             ch.close()
         self.chans.clear()
@@ -1617,6 +1642,581 @@ class Node:
 
     def shutdown(self):
         self.stop()
+
+
+# ---------------------------------------------------------------- voice calls
+T_CALL, T_AUDIO = 13, 14            # call signalling (JSON) and audio packets
+CALL_RATE = 16000                    # samples per second (wideband speech)
+CHUNK_SAMPLES = 320                  # 20 ms
+CHUNK_BYTES = CHUNK_SAMPLES * 2
+PACKET_CHUNKS = 4                    # 80 ms of audio per network packet
+CODEC_ADPCM, CODEC_OPUS = 1, 2
+MIN_SHAPE_FOR_CALLS = 14.0           # constant-rate frames/s needed to carry a call (12.5 packets/s)
+RING_SECONDS = 45
+AUDIO_HDR = ">HB"                    # packet number, codec
+
+_IMA_STEP = [7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80,
+             88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544,
+             598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 2272, 2499, 2749,
+             3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635,
+             13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
+_IMA_IDX = [-1, -1, -1, -1, 2, 4, 6, 8]
+
+
+def adpcm_encode(pcm, pred=0, idx=0):
+    """IMA ADPCM, 16-bit mono PCM (bytes, little endian) -> (4 bit codes, predictor, step index)."""
+    import array
+    s = array.array("h")
+    s.frombytes(pcm)
+    if sys.byteorder == "big":
+        s.byteswap()
+    step_t, idx_t = _IMA_STEP, _IMA_IDX
+    out = bytearray((len(s) + 1) // 2)
+    for i, x in enumerate(s):
+        diff = x - pred
+        sign = 0
+        if diff < 0:
+            sign = 8
+            diff = -diff
+        step = step_t[idx]
+        code = 0
+        vp = step >> 3
+        if diff >= step:
+            code = 4
+            diff -= step
+            vp += step
+        step >>= 1
+        if diff >= step:
+            code |= 2
+            diff -= step
+            vp += step
+        step >>= 1
+        if diff >= step:
+            code |= 1
+            vp += step
+        pred += -vp if sign else vp
+        pred = 32767 if pred > 32767 else -32768 if pred < -32768 else pred
+        idx += idx_t[code]
+        idx = 0 if idx < 0 else 88 if idx > 88 else idx
+        code |= sign
+        if i & 1:
+            out[i >> 1] |= code << 4
+        else:
+            out[i >> 1] = code
+    return bytes(out), pred, idx
+
+
+def adpcm_decode(data, count, pred=0, idx=0):
+    """Inverse of adpcm_encode(); returns (16-bit PCM bytes, predictor, step index)."""
+    import array
+    if not 0 <= idx <= 88:
+        raise ValueError("bad ADPCM state")
+    out = array.array("h", bytes(count * 2))
+    step_t, idx_t = _IMA_STEP, _IMA_IDX
+    for i in range(count):
+        b = data[i >> 1]
+        code = (b >> 4) if i & 1 else (b & 15)
+        step = step_t[idx]
+        vp = step >> 3
+        if code & 4:
+            vp += step
+        if code & 2:
+            vp += step >> 1
+        if code & 1:
+            vp += step >> 2
+        pred += -vp if code & 8 else vp
+        pred = 32767 if pred > 32767 else -32768 if pred < -32768 else pred
+        idx += idx_t[code & 7]
+        idx = 0 if idx < 0 else 88 if idx > 88 else idx
+        out[i] = pred
+    if sys.byteorder == "big":
+        out.byteswap()
+    return out.tobytes(), pred, idx
+
+
+def _opus_module():
+    """The opuslib module if it and the native libopus are usable, else None."""
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")          # old opuslib versions warn about their own syntax
+            import opuslib
+        opuslib.Encoder(CALL_RATE, 1, opuslib.APPLICATION_VOIP)
+        return opuslib
+    except Exception:
+        return None
+
+
+def call_codecs():
+    return ["opus", "adpcm"] if _opus_module() else ["adpcm"]
+
+
+class _AdpcmCodec:
+    cid = CODEC_ADPCM
+
+    def __init__(self):
+        self.epred = self.eidx = 0
+
+    def encode(self, pcm):                    # pcm: PACKET_CHUNKS * CHUNK_BYTES
+        pred, idx = self.epred, self.eidx
+        data, self.epred, self.eidx = adpcm_encode(pcm, pred, idx)
+        return struct.pack(">hB", pred, idx) + data
+
+    def decode(self, payload):                # -> list of PCM chunks
+        want = PACKET_CHUNKS * CHUNK_SAMPLES
+        if len(payload) != 3 + want // 2:
+            raise ValueError("bad ADPCM packet")
+        pred, idx = struct.unpack(">hB", payload[:3])
+        pcm, _, _ = adpcm_decode(payload[3:], want, pred, idx)
+        return [pcm[i:i + CHUNK_BYTES] for i in range(0, len(pcm), CHUNK_BYTES)]
+
+
+class _OpusCodec:
+    cid = CODEC_OPUS
+
+    def __init__(self):
+        op = _opus_module()
+        if not op:
+            raise RuntimeError("Opus is not available")
+        self.enc = op.Encoder(CALL_RATE, 1, op.APPLICATION_VOIP)
+        self.dec = op.Decoder(CALL_RATE, 1)
+
+    def encode(self, pcm):
+        out = bytearray()
+        for i in range(PACKET_CHUNKS):
+            f = self.enc.encode(pcm[i * CHUNK_BYTES:(i + 1) * CHUNK_BYTES], CHUNK_SAMPLES)
+            out.append(len(f))
+            out += f
+        return bytes(out)
+
+    def decode(self, payload):
+        chunks, pos = [], 0
+        for _ in range(PACKET_CHUNKS):
+            if pos >= len(payload):
+                raise ValueError("short Opus packet")
+            n = payload[pos]
+            f = payload[pos + 1:pos + 1 + n]
+            if len(f) != n or n == 0:
+                raise ValueError("bad Opus frame")
+            pos += 1 + n
+            pcm = self.dec.decode(bytes(f), CHUNK_SAMPLES)
+            if len(pcm) != CHUNK_BYTES:
+                raise ValueError("bad Opus frame size")
+            chunks.append(pcm)
+        if pos != len(payload):
+            raise ValueError("trailing bytes in Opus packet")
+        return chunks
+
+
+def _make_codec(cid):
+    return _OpusCodec() if cid == CODEC_OPUS else _AdpcmCodec()
+
+
+def pcm_level(pcm):
+    """Root-mean-square level of 16-bit PCM (0..32767)."""
+    import array
+    s = array.array("h")
+    s.frombytes(pcm[:len(pcm) // 2 * 2])
+    if not s:
+        return 0
+    if sys.byteorder == "big":
+        s.byteswap()
+    return int((sum(x * x for x in s[::4]) / max(1, len(s[::4]))) ** 0.5)
+
+
+class AudioUnavailable(Exception):
+    pass
+
+
+class SoundDeviceAudio:
+    """Microphone and speaker through PortAudio (the 'sounddevice' package)."""
+
+    def __init__(self, in_dev=None, out_dev=None):
+        try:
+            import sounddevice
+        except Exception as e:
+            raise AudioUnavailable(
+                "Audio needs the 'sounddevice' package and PortAudio "
+                f"(Linux: install libportaudio2 / portaudio). Details: {e}") from e
+        self.sd = sounddevice
+        self.in_dev, self.out_dev = in_dev, out_dev
+        self.streams = []
+
+    def start(self, on_mic, pull_out):
+        sd = self.sd
+
+        def cin(indata, frames, t, status):
+            on_mic(bytes(indata))
+
+        def cout(outdata, frames, t, status):
+            outdata[:] = pull_out()
+        try:
+            si = sd.RawInputStream(samplerate=CALL_RATE, blocksize=CHUNK_SAMPLES, channels=1, dtype="int16",
+                                   device=self.in_dev, callback=cin, latency="low")
+            so = sd.RawOutputStream(samplerate=CALL_RATE, blocksize=CHUNK_SAMPLES, channels=1, dtype="int16",
+                                    device=self.out_dev, callback=cout, latency="low")
+            si.start()
+            so.start()
+        except Exception as e:
+            self.stop()
+            raise AudioUnavailable(f"Could not open the microphone/speaker: {e}") from e
+        self.streams = [si, so]
+
+    def stop(self):
+        for s in self.streams:
+            try:
+                s.stop()
+                s.close()
+            except Exception:
+                pass
+        self.streams = []
+
+
+def default_audio_backend(in_dev=None, out_dev=None):
+    return SoundDeviceAudio(in_dev, out_dev)
+
+
+def list_audio_devices():
+    """([(index, name)] of inputs, [(index, name)] of outputs); raises AudioUnavailable."""
+    try:
+        import sounddevice as sd
+        devs = sd.query_devices()
+    except Exception as e:
+        raise AudioUnavailable(str(e)) from e
+    ins = [(i, d["name"]) for i, d in enumerate(devs) if d["max_input_channels"] > 0]
+    outs = [(i, d["name"]) for i, d in enumerate(devs) if d["max_output_channels"] > 0]
+    return ins, outs
+
+
+class AudioSession:
+    """One running call: encodes the microphone, plays what arrives, keeps a small jitter buffer."""
+
+    def __init__(self, mgr, chan, codec_id, backend, tor=False):
+        self.mgr, self.chan, self.backend = mgr, chan, backend
+        self.codec = _make_codec(codec_id)
+        self.rx_codec = _make_codec(codec_id)
+        self.rawq = queue.Queue(maxsize=30)
+        self.jb = collections.deque()
+        self.jb_lock = threading.Lock()
+        slow = tor or chan.rate > 0
+        self.target = 12 if slow else 5          # chunks (20 ms each) to collect before playing
+        self.buffering = True
+        self.seq = 0
+        self.stop_ev = threading.Event()
+        self.level_in = self.level_out = 0
+        self.stats = {"tx": 0, "rx": 0, "underruns": 0, "dropped_tx": 0, "dropped_rx": 0, "bad": 0}
+        self.started = time.time()
+
+    def start(self):
+        self.backend.start(self._on_mic, self._pull_out)
+        threading.Thread(target=self._sender, daemon=True).start()
+
+    def stop(self):
+        self.stop_ev.set()
+        try:
+            self.backend.stop()
+        except Exception:
+            pass
+
+    # microphone side: the audio callback only queues, the sender thread does the work
+    def _on_mic(self, pcm):
+        m = self.mgr
+        self.level_in = pcm_level(pcm)
+        if m.muted or (m.duck and self.level_out > 1500):
+            pcm = bytes(len(pcm))                 # silence: the packet pattern stays the same
+        try:
+            self.rawq.put_nowait(pcm)
+        except queue.Full:
+            try:
+                self.rawq.get_nowait()
+                self.rawq.put_nowait(pcm)
+            except (queue.Empty, queue.Full):
+                pass
+            self.stats["dropped_tx"] += 1
+
+    def _sender(self):
+        acc = []
+        while not self.stop_ev.is_set():
+            try:
+                acc.append(self.rawq.get(timeout=0.2))
+            except queue.Empty:
+                continue
+            if len(acc) < PACKET_CHUNKS:
+                continue
+            pcm, acc = b"".join(acc[:PACKET_CHUNKS]), acc[PACKET_CHUNKS:]
+            try:
+                payload = struct.pack(AUDIO_HDR, self.seq, self.codec.cid) + self.codec.encode(pcm)
+                self.seq = (self.seq + 1) & 0xFFFF
+                if self.chan.send_realtime(T_AUDIO, payload):
+                    self.stats["tx"] += 1
+                else:
+                    self.stats["dropped_tx"] += 1
+            except (OSError, ConnectionError):
+                self.mgr._ended_by_error("connection lost")
+                return
+            except Exception:
+                self.stats["bad"] += 1
+
+    # network side
+    def on_packet(self, data):
+        if len(data) < 3 or len(data) > 1100:
+            self.stats["bad"] += 1
+            return
+        seq, cid = struct.unpack(AUDIO_HDR, data[:3])
+        if cid != self.rx_codec.cid:
+            self.stats["bad"] += 1
+            return
+        try:
+            chunks = self.rx_codec.decode(data[3:])
+        except Exception:
+            self.stats["bad"] += 1
+            return
+        self.stats["rx"] += 1
+        with self.jb_lock:
+            self.jb.extend(chunks)
+            limit = self.target + 20
+            if len(self.jb) > limit:                 # too far behind: skip ahead
+                for _ in range(len(self.jb) - self.target):
+                    self.jb.popleft()
+                self.stats["dropped_rx"] += 1
+
+    def _pull_out(self):
+        with self.jb_lock:
+            if self.buffering:
+                if len(self.jb) >= self.target:
+                    self.buffering = False
+            if not self.buffering:
+                if self.jb:
+                    pcm = self.jb.popleft()
+                    self.level_out = pcm_level(pcm)
+                    return pcm
+                self.buffering = True                # ran dry: wait for a little more next time
+                self.target = min(self.target + 2, 30)
+                self.stats["underruns"] += 1
+        self.level_out = 0
+        return bytes(CHUNK_BYTES)
+
+
+class CallManager:
+    """1:1 voice calls over an existing encrypted connection (signalling = T_CALL, audio = T_AUDIO)."""
+
+    def __init__(self, node):
+        self.node = node
+        self.lock = threading.RLock()
+        self.state = "idle"                # idle | ringing-out | ringing-in | active
+        self.peer = None
+        self.chan = None
+        self.offered = []
+        self.codec = None
+        self.session = None
+        self.muted = False
+        self.remote_muted = False
+        self.duck = False                  # speakerphone mode: mute the microphone while the other side talks
+        self.in_dev = self.out_dev = None
+        self.backend_factory = default_audio_backend
+        self.ring_seconds = RING_SECONDS
+        self.codecs_override = None        # tests / settings: codecs this side is willing to use
+        self._timer = None
+        self.started = 0.0
+
+    def active(self):
+        return self.state == "active"
+
+    def busy(self):
+        return self.state != "idle"
+
+    def _emit(self, state, fp=None, detail=""):
+        self.node.emit("call", state, fp or self.peer, detail)
+
+    def _send(self, chan, **msg):
+        try:
+            chan.send(T_CALL, json.dumps(msg, separators=(",", ":")).encode())
+        except (OSError, ConnectionError):
+            pass
+
+    def _arm_timer(self):
+        self._cancel_timer()
+        self._timer = threading.Timer(self.ring_seconds, self._ring_timeout)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _cancel_timer(self):
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+    def _ring_timeout(self):
+        with self.lock:
+            if self.state == "ringing-out":
+                self._send(self.chan, t="cancel")
+                self._finish("noanswer")
+            elif self.state == "ringing-in":
+                self._send(self.chan, t="reject")
+                self._finish("missed")
+
+    def _finish(self, why, detail=""):
+        with self.lock:
+            fp, sess = self.peer, self.session
+            self._cancel_timer()
+            self.state, self.peer, self.chan, self.session = "idle", None, None, None
+            self.offered, self.codec, self.remote_muted = [], None, False
+        if sess:
+            sess.stop()
+        self.node.emit("call", why, fp, detail)
+
+    def _ended_by_error(self, msg):
+        with self.lock:
+            if self.state == "idle":
+                return
+            if self.chan:
+                self._send(self.chan, t="hangup")
+        self._finish("error", msg)
+
+    def _check_ready(self, chan):
+        if chan.rate > 0 and chan.rate < MIN_SHAPE_FOR_CALLS:
+            raise ConnectionError(
+                f"Constant-rate traffic is too slow for a call ({chan.rate:g} frames/s; "
+                f"at least {MIN_SHAPE_FOR_CALLS:g} needed). Raise it in Options.")
+        backend = self.backend_factory(self.in_dev, self.out_dev)   # raises AudioUnavailable early
+        del backend
+
+    # ---- user actions
+    def call(self, fp):
+        with self.lock:
+            if self.state != "idle":
+                raise ConnectionError("Already in a call")
+            chan = self.node.chans.get(fp)
+            if not chan:
+                raise ConnectionError("Not connected to that peer")
+            try:
+                self._check_ready(chan)
+            except AudioUnavailable as e:
+                raise ConnectionError(str(e))
+            self.state, self.peer, self.chan = "ringing-out", fp, chan
+            self.offered = list(self.codecs_override or call_codecs())
+            self._arm_timer()
+        self._send(chan, t="invite", codecs=self.offered)
+        self._emit("ringing", fp)
+
+    def accept(self):
+        with self.lock:
+            if self.state != "ringing-in":
+                raise ConnectionError("No incoming call")
+            mine = self.codecs_override or call_codecs()
+            codec = next((c for c in mine if c in self.offered), "adpcm")
+            chan, fp = self.chan, self.peer
+            self._cancel_timer()
+            try:
+                self._start_session(codec)
+            except Exception as e:
+                self._send(chan, t="hangup")
+                self._finish("error", str(e))
+                raise ConnectionError(str(e))
+        self._send(chan, t="accept", codec=codec)
+        self._emit("active", fp, codec)
+
+    def reject(self):
+        with self.lock:
+            if self.state != "ringing-in":
+                return
+            self._send(self.chan, t="reject")
+        self._finish("rejected")
+
+    def hangup(self):
+        with self.lock:
+            if self.state == "idle":
+                return
+            st, chan = self.state, self.chan
+            if chan:
+                self._send(chan, t="cancel" if st == "ringing-out" else "hangup")
+        self._finish("ended")
+
+    def set_muted(self, on):
+        self.muted = bool(on)
+        with self.lock:
+            if self.state == "active" and self.chan:
+                self._send(self.chan, t="mute", m=self.muted)
+
+    def stats(self):
+        s = self.session
+        if not s:
+            return None
+        d = dict(s.stats)
+        d.update(level_in=s.level_in, level_out=s.level_out, seconds=int(time.time() - self.started),
+                 codec=self.codec, remote_muted=self.remote_muted, buffer=len(s.jb), target=s.target)
+        return d
+
+    def _start_session(self, codec):
+        backend = self.backend_factory(self.in_dev, self.out_dev)
+        sess = AudioSession(self, self.chan, CODEC_OPUS if codec == "opus" else CODEC_ADPCM, backend,
+                            tor=self.node.transport == "tor")
+        sess.start()
+        self.session, self.codec, self.state, self.started = sess, codec, "active", time.time()
+        if self.muted:
+            self._send(self.chan, t="mute", m=True)
+
+    # ---- incoming frames (called from the receive thread of a peer)
+    def on_call(self, fp, chan, data):
+        try:
+            msg = json.loads(data.decode("utf-8"))
+            t = msg["t"]
+        except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+            return                                  # garbage signalling is ignored
+        if not isinstance(t, str):
+            return
+        if t == "invite":
+            codecs = [c for c in (msg.get("codecs") or []) if c in ("opus", "adpcm")] if isinstance(msg.get("codecs"), list) else []
+            with self.lock:
+                if self.state != "idle" or "adpcm" not in codecs:
+                    self._send(chan, t="busy")
+                    return
+                self.state, self.peer, self.chan, self.offered = "ringing-in", fp, chan, codecs
+                self._arm_timer()
+            self._emit("incoming", fp)
+            return
+        with self.lock:
+            if fp != self.peer:
+                return
+            state = self.state
+        if t == "accept" and state == "ringing-out":
+            codec = msg.get("codec")
+            if codec not in self.offered:
+                self._send(chan, t="hangup")
+                self._finish("error", "peer picked an unknown codec")
+                return
+            with self.lock:
+                self._cancel_timer()
+                try:
+                    self._start_session(codec)
+                except Exception as e:
+                    self._send(chan, t="hangup")
+                    err = str(e)
+                else:
+                    err = None
+            if err:
+                self._finish("error", err)
+            else:
+                self._emit("active", fp, codec)
+        elif t in ("reject", "busy") and state == "ringing-out":
+            self._finish("rejected" if t == "reject" else "busy")
+        elif t == "cancel" and state == "ringing-in":
+            self._finish("missed")
+        elif t == "hangup" and state in ("active", "ringing-out", "ringing-in"):
+            self._finish("ended-remote")
+        elif t == "mute" and state == "active":
+            self.remote_muted = bool(msg.get("m"))
+            self._emit("remote-mute", fp, "1" if self.remote_muted else "")
+
+    def on_audio(self, fp, data):
+        s = self.session
+        if s is not None and fp == self.peer and self.state == "active":
+            s.on_packet(data)
+
+    def on_disconnect(self, fp):
+        with self.lock:
+            hit = self.peer == fp and self.state != "idle"
+        if hit:
+            self._finish("ended-remote", "connection closed")
 
 
 # ---------------------------------------------------------------- GUI (hacker style)
@@ -2259,11 +2859,143 @@ def main(args=None):
     mk_btn(f4, "send", lambda: do_send()).pack(side="left", padx=2)
     mk_btn(f4, "file", lambda: do_file()).pack(side="left", padx=2)
     mk_btn(f4, "folder", lambda: do_folder()).pack(side="left", padx=2)
+    call_btn = mk_btn(f4, "call", lambda: do_call(), ACC)
+    call_btn.pack(side="left", padx=2)
     pause_btn = mk_btn(f4, "pause", lambda: toggle_pause(), DIM)
     pause_btn.pack(side="left", padx=2)
     mk_btn(f4, "cancel", lambda: node.cancel_transfer(), DIM).pack(side="left", padx=2)
     mk_btn(f4, "wipe", lambda: wipe(), ACC).pack(side="left", padx=2)
     mk_btn(f4, "PANIC", lambda: panic(), RED).pack(side="left", padx=2)
+
+    # --- voice call bar (shown only while a call is ringing or running)
+    call_bar = tk.Frame(root, bg=BG, highlightthickness=1, highlightbackground=ACC)
+    call_var = tk.StringVar(value="")
+    tk.Label(call_bar, textvariable=call_var, bg=BG, fg=ACC, font=FONT, anchor="w").pack(side="left", padx=8, pady=4)
+    mk_btn(call_bar, "hang up", lambda: node.calls.hangup(), RED).pack(side="right", padx=6, pady=3)
+    mute_btn = mk_btn(call_bar, "mute", lambda: toggle_mute(), DIM)
+    mute_btn.pack(side="right", padx=2, pady=3)
+    ring = {"win": None, "after": None}
+
+    def bar(level, total=8):
+        n = min(total, int(level / 3000 * total + 0.5)) if level else 0
+        return "#" * n + "-" * (total - n)
+
+    def call_tick():
+        c = node.calls
+        if c.state == "idle":
+            return
+        who = node.label(c.peer) if c.peer else "?"
+        if c.state == "active":
+            st = c.stats() or {}
+            sec = st.get("seconds", 0)
+            call_var.set(f"CALL {who}  {sec // 60:02d}:{sec % 60:02d}  [{st.get('codec', '')}]  "
+                         f"mic [{bar(st.get('level_in', 0))}]{' MUTED' if c.muted else ''}  "
+                         f"them [{bar(st.get('level_out', 0))}]{' (muted)' if c.remote_muted else ''}"
+                         + (f"  gaps {st.get('underruns', 0)}" if st.get("underruns") else ""))
+        elif c.state == "ringing-out":
+            call_var.set(f"CALLING {who}...")
+        root.after(300, call_tick)
+
+    def show_call_bar():
+        if not call_bar.winfo_ismapped():
+            call_bar.pack(fill="x", padx=8, pady=(0, 4), before=f4)
+            call_tick()
+
+    def hide_call_bar():
+        call_bar.pack_forget()
+        call_var.set("")
+        mute_btn.config(text="mute")
+
+    def toggle_mute():
+        node.calls.set_muted(not node.calls.muted)
+        mute_btn.config(text="unmute" if node.calls.muted else "mute")
+
+    def close_ring():
+        if ring["win"]:
+            try:
+                ring["win"].destroy()
+            except tk.TclError:
+                pass
+            ring["win"] = None
+        if ring["after"]:
+            root.after_cancel(ring["after"])
+            ring["after"] = None
+
+    def incoming_dialog(fp):
+        close_ring()
+        win = tk.Toplevel(root)
+        win.title("Incoming call")
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        ring["win"] = win
+        tk.Label(win, text="INCOMING CALL", bg=BG, fg=ACC, font=(FONT[0], 14)).pack(padx=30, pady=(16, 4))
+        tk.Label(win, text=f"{node.label(fp)}  ({short(fp)})", bg=BG, fg=FG, font=FONT).pack(padx=30)
+        f = tk.Frame(win, bg=BG)
+        f.pack(pady=14)
+
+        def acc():
+            close_ring()
+            try:
+                node.calls.accept()
+            except Exception as e:
+                log(f"{e}", "err")
+
+        def rej():
+            close_ring()
+            node.calls.reject()
+        mk_btn(f, "accept", acc).pack(side="left", padx=8)
+        mk_btn(f, "reject", rej, RED).pack(side="left", padx=8)
+        win.protocol("WM_DELETE_WINDOW", rej)
+
+        def beep():
+            if ring["win"] is win:
+                root.bell()
+                ring["after"] = root.after(1500, beep)
+        beep()
+
+    def do_call():
+        peers = list(node.chans)
+        if not peers:
+            return log("Not connected - nobody to call", "err")
+        if node.calls.busy():
+            return log("Already in a call", "err")
+
+        def go(fp):
+            try:
+                node.calls.call(fp)
+            except Exception as e:
+                log(f"{e}", "err")
+        if len(peers) == 1:
+            return go(peers[0])
+        menu = tk.Menu(root, tearoff=0, bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT)
+        for fp in peers:
+            menu.add_command(label=node.label(fp), command=lambda f=fp: go(f))
+        menu.tk_popup(call_btn.winfo_rootx(), call_btn.winfo_rooty() + call_btn.winfo_height())
+
+    CALL_TEXT = {"rejected": "Call declined", "busy": "Busy - the other side is in a call",
+                 "noanswer": "No answer", "missed": "Call ended before you answered",
+                 "ended": "Call ended", "ended-remote": "The other side ended the call"}
+
+    def on_call_event(state, fp, detail):
+        who = node.label(fp) if fp else "?"
+        if state == "incoming":
+            log(f"Incoming call from {who}", "me")
+            notify()
+            incoming_dialog(fp)
+        elif state == "ringing":
+            log(f"Calling {who}...")
+            show_call_bar()
+        elif state == "active":
+            close_ring()
+            log(f"Call with {who} started ({detail})", "me")
+            show_call_bar()
+        elif state == "remote-mute":
+            log(f"{who} muted their microphone" if detail else f"{who} unmuted")
+        elif state in CALL_TEXT or state == "error":
+            close_ring()
+            hide_call_bar()
+            log((f"Call error: {detail}" if state == "error" else f"{CALL_TEXT[state]} ({who})")
+                + (f" - {detail}" if detail and state != "error" else ""), "err" if state == "error" else "sys")
 
     # --- lock screen (covers everything; messages keep arriving behind it)
     lock_frame = tk.Frame(root, bg=BG)
@@ -2655,6 +3387,36 @@ def main(args=None):
         tm.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT,
                   relief="flat", highlightthickness=1, highlightbackground=DIM)
         row(tk.Label(win, text="colour theme", bg=BG, fg=DIM, font=FONT), tm)
+        section("voice calls")
+        try:
+            ins, outs = list_audio_devices()
+        except AudioUnavailable as e:
+            ins = outs = None
+            tk.Label(win, text="Calls need the 'sounddevice' package / PortAudio:\n" + str(e)[:150], bg=BG, fg=RED, font=FONT,
+                     justify="left", wraplength=560).grid(row=r, column=0, columnspan=3, sticky="w", padx=8)
+            r += 1
+        if ins is not None:
+            def devmenu(label, devs, attr):
+                names = ["(default)"] + [f"{i}: {n}"[:60] for i, n in devs]
+                cur = getattr(node.calls, attr)
+                var = tk.StringVar(value=next((x for x in names if cur is not None and x.startswith(f"{cur}:")), names[0]))
+
+                def pick(v):
+                    setattr(node.calls, attr, None if v == "(default)" else int(v.split(":", 1)[0]))
+                om = tk.OptionMenu(win, var, *names, command=pick)
+                om.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT, relief="flat",
+                          highlightthickness=1, highlightbackground=DIM, width=34)
+                row(tk.Label(win, text=label, bg=BG, fg=DIM, font=FONT), om)
+            devmenu("microphone", ins, "in_dev")
+            devmenu("speaker", outs, "out_dev")
+        duck_var = tk.BooleanVar(value=node.calls.duck)
+        row(mk_check(win, "speakerphone mode (mute my microphone while the other side talks - avoids echo)", duck_var,
+                     lambda: setattr(node.calls, "duck", duck_var.get())))
+        tk.Label(win, text="codec: " + ("Opus (best quality) with ADPCM fallback" if "opus" in call_codecs() else
+                                         "ADPCM 16 kHz (Opus not installed)") + " - a call uses about 10 KB/s; use a headset",
+                 bg=BG, fg=ACC, font=FONT, anchor="w", wraplength=560, justify="left").grid(
+            row=r, column=0, columnspan=3, sticky="w", padx=8)
+        r += 1
         section("file transfer")
         limit_var = tk.StringVar(value=str(node.speed_limit // 1024))
 
@@ -2870,6 +3632,8 @@ def main(args=None):
                         eta = f" ETA {s // 60:02d}:{s % 60:02d}"
                     prog_var.set(f"{label} [{bar}] {pct}% {human(speed)}/s{eta}" if speed
                                  else f"{label} [{bar}] {pct}%")
+                elif k == "call":
+                    on_call_event(ev[1], ev[2], ev[3])
                 elif k == "queue":
                     qn = len(node.queue_info())
                     if qn > 1:
@@ -2995,6 +3759,21 @@ def cli_main(args):
                 print(f"[-] {node.label(ev[1])} disconnected")
             elif k == "file":
                 print(("[+] File received: " if ev[3] else "[!] DAMAGED file: ") + ev[2])
+            elif k == "call":
+                who = node.label(ev[2]) if ev[2] else "?"
+                st = ev[1]
+                if st == "incoming":
+                    print(f"[*] INCOMING CALL from {who} - type /accept or /reject")
+                elif st == "ringing":
+                    print(f"[*] calling {who}...")
+                elif st == "active":
+                    print(f"[*] call with {who} started ({ev[3]}) - /mute to mute, /hangup to end")
+                elif st == "remote-mute":
+                    print(f"[*] {who} {'muted' if ev[3] else 'unmuted'}")
+                elif st == "error":
+                    print(f"[!] call error: {ev[3]}")
+                else:
+                    print(f"[*] call: {st} ({who})")
     threading.Thread(target=printer, daemon=True).start()
 
     try:
@@ -3017,7 +3796,7 @@ def cli_main(args):
     if node.shape:
         print("[*] Constant-rate traffic:", shape_estimate(node.shape, args.tor))
     print("Commands: /send <file|folder>  /connect <host[:port]> [fp]  /peers  /name <id> <name>  /fp  /words\n"
-          "          /allow <fp>  /relay on|off  /cover on|off|chat|browse|stream  /shape <frames/s|off>  /limit <KB/s|off>\n          /queue  /pause  /resume  /cancel [id|all]  /quit\n"
+          "          /allow <fp>  /relay on|off  /cover on|off|chat|browse|stream  /shape <frames/s|off>  /limit <KB/s|off>\n          /queue  /pause  /resume  /cancel [id|all]\n          /call [peer]  /accept  /reject  /hangup  /mute  /quit\n"
           "          (other text goes to everyone)")
     try:
         for line in sys.stdin:
@@ -3074,6 +3853,28 @@ def cli_main(args):
                     print("Usage: /name <id-or-name> <new name>   (see /peers)")
             elif line == "/peers":
                 print(", ".join(f"{node.label(f)} ({short(f)})" for f in node.chans) or "(none)")
+            elif line.startswith("/call"):
+                arg = line[5:].strip()
+                fp = node.find_peer(arg) if arg else (next(iter(node.chans)) if len(node.chans) == 1 else None)
+                if not fp:
+                    print("[!] Usage: /call <id-or-name>   (see /peers; with a single peer no argument is needed)")
+                else:
+                    try:
+                        node.calls.call(fp)
+                    except Exception as e:
+                        print(f"[!] {e}")
+            elif line == "/accept":
+                try:
+                    node.calls.accept()
+                except Exception as e:
+                    print(f"[!] {e}")
+            elif line == "/reject":
+                node.calls.reject()
+            elif line == "/hangup":
+                node.calls.hangup()
+            elif line == "/mute":
+                node.calls.set_muted(not node.calls.muted)
+                print("[*] microphone " + ("muted" if node.calls.muted else "on"))
             elif line == "/pause":
                 node.pause_transfers()
             elif line == "/resume":

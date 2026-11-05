@@ -37,6 +37,7 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
   and **cover traffic** (dummy frames, optionally imitating chat, browsing or streaming patterns).
 - **Passphrase-protected identity key** (scrypt + ChaCha20-Poly1305); the list of known peers is encrypted with the same passphrase.
 - **Hygiene options**: clipboard auto-clear after 30 s, notifications without message content, screenshot/recording block on Windows.
+- **Voice calls**: one-to-one, end-to-end encrypted, Opus or built-in ADPCM, mute, works over Tor.
 - **Themes**: hacker, amber, ice, Miami-Vice, blood, light, paper and high-contrast, switchable live.
 - **Network extras**: SOCKS5 proxy for direct connections, IPv6, automatic Tor bridge download (Moat).
 - Runs on **Windows, Linux and macOS** from one Python file (`mute.py`).
@@ -185,6 +186,25 @@ SOCKS5 proxy that can reach it (a VPN's proxy, another Tor; `--proxy HOST:PORT`)
 over a normal HTTPS connection (not domain-fronted), so a censor that blocks that site *and* watches for it will see the request - then get bridges by email/web
 as before. Not yet verified against the live service by the author; the protocol is tested against a mock server.
 
+## Voice calls
+
+Press **call** (or `/call` in the terminal) to ring a connected peer; they get an **incoming call** window and must **accept** - nobody can open your microphone remotely, and
+the microphone is only opened after you start or accept a call. During a call the bar shows time, codec, microphone/peer level and gives **mute** and **hang up**.
+
+- **Same security as the chat**: the audio travels inside the encrypted Noise connection (and the periodic key renewal), over DIRECT or Tor. No server, nothing is recorded or saved.
+- **Quality**: 16 kHz wideband speech. It uses **Opus** when `opuslib` and the native `libopus` are available (Linux: installed by `install.sh`; macOS: `brew install opus`; Windows: put `opus.dll` next to Mute),
+  otherwise a built-in **ADPCM** codec (clearly good for voice, 4 bits per sample). Both sides pick the best codec they share.
+- **Traffic**: about 10 KB/s per direction (80 ms of audio in each 1 KB frame). **Muting does not change the traffic pattern** - silence is sent as normal packets, so a network observer cannot tell
+  whether you are talking or muted. With **constant-rate mode** (at least 14 frames/s) calls fit into the fixed stream; slower settings are refused with a message.
+- **Files wait during a call**: running file transfers pause automatically and continue afterwards; chat keeps working.
+- **Echo**: use a headset. Without one, Options > voice calls > *speakerphone mode* mutes your microphone while the other side talks (half-duplex, no echo, but you cannot interrupt).
+- **Over Tor** expect about half a second of delay (Mute buffers more to avoid stutter); over DIRECT/VPN it feels like a normal call.
+- Choose microphone and speaker in Options > voice calls. Needs the `sounddevice` package (installed automatically; Linux needs PortAudio, `install.sh` adds it). macOS asks for microphone permission on the first call.
+- Terminal: `/call [peer]`, `/accept`, `/reject`, `/hangup`, `/mute`.
+
+**Honest limits:** the hearing quality, devices and echo on real hardware have not been tried by the author (the tests use a simulated sound card), calls are one-to-one (no group calls),
+and a call is visible to a network observer as a steady ~10 KB/s stream (use constant-rate mode if you want even *calls* to look like normal traffic).
+
 ## Start, stop and lock
 
 **[ START ]** begins listening (and starts Tor in TOR mode); **[ STOP ]** disconnects everybody, stops listening and shuts Tor down again, so you can switch between DIRECT and TOR
@@ -266,6 +286,7 @@ In TOR mode also your IP address and who talks to whom. Closed mode and onion cl
 
 **Does not protect against**:
 - a compromised device or keylogger, or skipping the fingerprint check (use words/fingerprint, a shared secret, or closed mode);
+- during a call the audio of an authenticated peer is decoded; the built-in ADPCM decoder is plain Python, the optional Opus decoder is the native `libopus` library (keep it updated; it only runs after you accept a call);
 - traffic-timing analysis by a strong adversary - **cover traffic and constant-rate mode help only against simple observers**, they are not a guarantee;
 - metadata in DIRECT mode (IP addresses and traffic volume are visible);
 - **a malicious relay hub**: in relay mode the hub operator can drop, delay or **forge** relayed messages (the origin shown for
