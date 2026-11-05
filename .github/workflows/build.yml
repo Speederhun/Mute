@@ -90,7 +90,7 @@ jobs:
             dist/Mute.exe
             dist/Mute-cli.exe
             dist/Mute-windows-installer.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mute-windows
           path: |
@@ -130,7 +130,7 @@ jobs:
           subject-path: |
             dist/Mute-linux.tar.gz
             dist/Mute-linux-installer.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mute-linux
           path: |
@@ -169,7 +169,7 @@ jobs:
           subject-path: |
             dist/Mute-macos.zip
             dist/Mute-macos-installer.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mute-macos
           path: |
@@ -226,7 +226,7 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/Mute-android.apk
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mute-android
           path: dist/Mute-android.apk
