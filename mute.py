@@ -16,6 +16,7 @@ Cryptography:
     zip timestamps) before they leave your machine
   * No logs, messages live in memory only
 """
+import array
 import base64
 import collections
 import hashlib
@@ -1895,6 +1896,174 @@ def list_audio_devices():
     return ins, outs
 
 
+def scale_pcm(pcm, gain):
+    """Volume for 16-bit little-endian mono samples (gain 1.0 = unchanged); clips instead of wrapping."""
+    if abs(gain - 1.0) < 0.01:
+        return pcm
+    a = array.array("h")
+    a.frombytes(pcm)
+    if sys.byteorder != "little":
+        a.byteswap()
+    for i, v in enumerate(a):
+        v = int(v * gain)
+        a[i] = 32767 if v > 32767 else -32768 if v < -32768 else v
+    if sys.byteorder != "little":
+        a.byteswap()
+    return a.tobytes()
+
+
+# ---------------------------------------------------------------- small notification sounds
+SOUND_RATE = 22050
+SOUND_DEFS = {                                   # name -> [(frequency Hz or 0 for a pause, milliseconds)]
+    "message": [(880, 70), (0, 30), (1320, 110)],
+    "peer": [(660, 90), (990, 140)],
+    "file": [(990, 70), (1320, 70), (1760, 120)],
+    "ring": [(880, 160), (0, 70), (880, 160), (0, 70), (660, 320)],
+    "ringback": [(425, 450), (0, 150), (425, 450)],
+    "connected": [(740, 80), (988, 80), (1318, 130)],
+    "ended": [(988, 100), (740, 100), (494, 180)],
+    "error": [(330, 130), (0, 40), (262, 220)],
+}
+SOUND_LOOPS = {"ring": 2.4, "ringback": 3.5}     # sounds that repeat while a call rings (seconds per round)
+
+
+def make_sound(name, volume=70):
+    """WAV file bytes for one of the SOUND_DEFS (volume 0-100)."""
+    import io
+    import math
+    import wave
+    amp = 32767 * 0.55 * max(0, min(100, volume)) / 100.0
+    out = array.array("h")
+    for freq, ms in SOUND_DEFS[name]:
+        n = SOUND_RATE * ms // 1000
+        fade = max(1, min(n // 2, SOUND_RATE // 200))          # 5 ms fades: no clicks
+        for i in range(n):
+            if freq:
+                env = min(1.0, i / fade, (n - 1 - i) / fade)
+                out.append(int(amp * env * math.sin(2 * math.pi * freq * i / SOUND_RATE)))
+            else:
+                out.append(0)
+    if sys.byteorder != "little":
+        out.byteswap()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SOUND_RATE)
+        w.writeframes(out.tobytes())
+    return buf.getvalue()
+
+
+class Sounds:
+    """Plays the small notification sounds (incoming message, ringing ...) without any extra package:
+    winsound on Windows, afplay on macOS, paplay / pw-play / aplay on Linux. Falls back to `fallback()` (the terminal / window bell)."""
+
+    def __init__(self, enabled=True, volume=70, player=None, fallback=None):
+        self.enabled, self.volume = enabled, volume
+        self.player = player                  # tests: callable(wav_bytes)
+        self.fallback = fallback
+        self._cache = {}
+        self._dir = None
+        self._loop_stop = threading.Event()
+        self._loop_name = None
+        self._lock = threading.Lock()
+
+    def _wav(self, name):
+        key = (name, self.volume)
+        if key not in self._cache:
+            self._cache[key] = make_sound(name, self.volume)
+        return self._cache[key]
+
+    def _play_bytes(self, wav, name):
+        if self.player:
+            return self.player(wav)
+        try:
+            if os.name == "nt":
+                import winsound
+                winsound.PlaySound(wav, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+                return
+            cmd = None
+            for tool, args in (("afplay", []), ("paplay", []), ("pw-play", []), ("aplay", ["-q"])):
+                if shutil.which(tool):
+                    cmd = [tool] + args
+                    break
+            if cmd:
+                if self._dir is None:
+                    self._dir = tempfile.mkdtemp(prefix="mute-snd-")
+                path = os.path.join(self._dir, f"{name}-{self.volume}.wav")
+                if not os.path.exists(path):
+                    with open(path, "wb") as f:
+                        f.write(wav)
+                subprocess.run(cmd + [path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                return
+        except Exception:
+            pass
+        if self.fallback:
+            try:
+                self.fallback()
+            except Exception:
+                pass
+
+    def play(self, name):
+        """One short sound in the background (does nothing when sounds are off)."""
+        if not self.enabled or name not in SOUND_DEFS:
+            return
+        threading.Thread(target=lambda: self._play_bytes(self._wav(name), name), daemon=True).start()
+
+    def loop(self, name):
+        """Repeats a ring sound until stop() (a new loop replaces the old one)."""
+        self.stop()
+        if not self.enabled or name not in SOUND_DEFS:
+            return
+        stop = threading.Event()
+        with self._lock:
+            self._loop_stop, self._loop_name = stop, name
+        gap = SOUND_LOOPS.get(name, 2.5)
+
+        def run():
+            while not stop.is_set():
+                self._play_bytes(self._wav(name), name)
+                stop.wait(max(0.2, gap - sum(ms for _, ms in SOUND_DEFS[name]) / 1000.0))
+        threading.Thread(target=run, daemon=True).start()
+
+    def stop(self):
+        with self._lock:
+            self._loop_stop.set()
+            self._loop_name = None
+
+    def looping(self):
+        return self._loop_name
+
+
+AUDIO_PREFS_DEFAULT = {"sounds": True, "sound_volume": 70, "volume": 100, "mic_gain": 100,
+                       "ptt": False, "ptt_key": "F8"}
+
+
+def load_audio_prefs():
+    d = dict(AUDIO_PREFS_DEFAULT)
+    try:
+        with open(os.path.join(APP_DIR, "audio.json"), encoding="utf-8") as f:
+            saved = json.load(f)
+        for k, v in AUDIO_PREFS_DEFAULT.items():
+            if k in saved and type(saved[k]) is type(v):
+                d[k] = saved[k]
+    except (OSError, ValueError):
+        pass
+    d["volume"] = max(0, min(300, d["volume"]))
+    d["mic_gain"] = max(0, min(300, d["mic_gain"]))
+    d["sound_volume"] = max(0, min(100, d["sound_volume"]))
+    return d
+
+
+def save_audio_prefs(d):
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(os.path.join(APP_DIR, "audio.json"), "w", encoding="utf-8") as f:
+            json.dump({k: d[k] for k in AUDIO_PREFS_DEFAULT}, f)
+    except OSError:
+        pass
+
+
 class AudioSession:
     """One running call: encodes the microphone, plays what arrives, keeps a small jitter buffer."""
 
@@ -1928,9 +2097,11 @@ class AudioSession:
     # microphone side: the audio callback only queues, the sender thread does the work
     def _on_mic(self, pcm):
         m = self.mgr
-        self.level_in = pcm_level(pcm)
-        if m.muted or (m.duck and self.level_out > 1500):
+        if m.muted or (m.ptt and not m.ptt_down) or (m.duck and self.level_out > 1500):
             pcm = bytes(len(pcm))                 # silence: the packet pattern stays the same
+        elif m.mic_gain != 1.0:
+            pcm = scale_pcm(pcm, m.mic_gain)
+        self.level_in = pcm_level(pcm)
         try:
             self.rawq.put_nowait(pcm)
         except queue.Full:
@@ -1996,7 +2167,7 @@ class AudioSession:
                 if self.jb:
                     pcm = self.jb.popleft()
                     self.level_out = pcm_level(pcm)
-                    return pcm
+                    return scale_pcm(pcm, self.mgr.volume)
                 self.buffering = True                # ran dry: wait for a little more next time
                 self.target = min(self.target + 2, 30)
                 self.stats["underruns"] += 1
@@ -2018,6 +2189,10 @@ class CallManager:
         self.session = None
         self.muted = False
         self.remote_muted = False
+        self.ptt = False                   # push to talk: the microphone only transmits while ptt_down
+        self.ptt_down = False
+        self.volume = 1.0                  # playback gain
+        self.mic_gain = 1.0
         self.duck = False                  # speakerphone mode: mute the microphone while the other side talks
         self.in_dev = self.out_dev = None
         self.backend_factory = default_audio_backend
@@ -2067,6 +2242,7 @@ class CallManager:
             self._cancel_timer()
             self.state, self.peer, self.chan, self.session = "idle", None, None, None
             self.offered, self.codec, self.remote_muted = [], None, False
+            self.ptt_down = False
         if sess:
             sess.stop()
         self.node.emit("call", why, fp, detail)
@@ -2143,6 +2319,14 @@ class CallManager:
         with self.lock:
             if self.state == "active" and self.chan:
                 self._send(self.chan, t="mute", m=self.muted)
+
+    def set_ptt(self, on):
+        self.ptt = bool(on)
+        if not on:
+            self.ptt_down = False
+
+    def ptt_press(self, down):
+        self.ptt_down = bool(down)
 
     def stats(self):
         s = self.session
@@ -2874,6 +3058,25 @@ def main(args=None):
     mk_btn(f4, "wipe", lambda: wipe(), ACC).pack(side="left", padx=2)
     mk_btn(f4, "PANIC", lambda: panic(), RED).pack(side="left", padx=2)
 
+    # --- sounds, call volume, push to talk (saved in audio.json unless burner / amnesia)
+    prefs = load_audio_prefs()
+    node.calls.volume = prefs["volume"] / 100.0
+    node.calls.mic_gain = prefs["mic_gain"] / 100.0
+    node.calls.set_ptt(prefs["ptt"])
+    sounds = Sounds(prefs["sounds"], prefs["sound_volume"], fallback=lambda: root.after(0, root.bell))
+
+    def save_prefs():
+        if not (burner or args.amnesia):
+            save_audio_prefs(prefs)
+
+    def mk_scale(parent, lo, hi, value, cmd, length=180):
+        sc = tk.Scale(parent, from_=lo, to=hi, orient="horizontal", length=length, showvalue=False,
+                      bg=BG, fg=FG, troughcolor=ENT, highlightthickness=0, bd=0,
+                      sliderrelief="flat", activebackground=ACC, command=cmd)
+        sc.set(value)
+        sc.bind("<ButtonRelease-1>", lambda e: save_prefs(), add="+")
+        return sc
+
     # --- voice call bar (shown only while a call is ringing or running)
     call_bar = tk.Frame(root, bg=BG, highlightthickness=1, highlightbackground=ACC)
     call_var = tk.StringVar(value="")
@@ -2881,6 +3084,59 @@ def main(args=None):
     mk_btn(call_bar, "hang up", lambda: node.calls.hangup(), RED).pack(side="right", padx=6, pady=3)
     mute_btn = mk_btn(call_bar, "mute", lambda: toggle_mute(), DIM)
     mute_btn.pack(side="right", padx=2, pady=3)
+
+    def set_call_volume(v):
+        prefs["volume"] = int(float(v))
+        node.calls.volume = prefs["volume"] / 100.0
+    vol_scale = mk_scale(call_bar, 0, 200, prefs["volume"], set_call_volume, length=80)
+    vol_scale.pack(side="right", padx=2, pady=3)
+    tk.Label(call_bar, text="vol", bg=BG, fg=DIM, font=FONT).pack(side="right")
+    ptt_btn = mk_btn(call_bar, "hold to talk", lambda: None, ACC)
+    ptt = {"down": False, "after": None, "key": prefs["ptt_key"]}
+
+    def ptt_set(down):
+        ptt["down"] = down
+        node.calls.ptt_press(down)
+        ptt_btn.config(text="TALKING" if down else "hold to talk")
+
+    def refresh_ptt():
+        if node.calls.ptt:
+            ptt_btn.pack(side="right", padx=4, pady=3, before=mute_btn)
+        else:
+            ptt_btn.pack_forget()
+            ptt_set(False)
+    ptt_btn.bind("<ButtonPress-1>", lambda e: ptt_set(True))
+    ptt_btn.bind("<ButtonRelease-1>", lambda e: ptt_set(False))
+
+    def key_down(e):
+        if not node.calls.ptt:
+            return
+        if ptt["after"]:
+            root.after_cancel(ptt["after"])
+            ptt["after"] = None
+        if not ptt["down"]:
+            ptt_set(True)
+
+    def key_up(e):                         # key auto-repeat sends release+press pairs: wait a moment before letting go
+        if ptt["down"] and not ptt["after"]:
+            def let_go():
+                ptt["after"] = None
+                ptt_set(False)
+            ptt["after"] = root.after(90, let_go)
+
+    def bind_ptt_key(new):
+        try:
+            root.unbind_all(f"<KeyPress-{ptt['key']}>")
+            root.unbind_all(f"<KeyRelease-{ptt['key']}>")
+        except tk.TclError:
+            pass
+        ptt["key"] = new
+        try:
+            root.bind_all(f"<KeyPress-{new}>", key_down)
+            root.bind_all(f"<KeyRelease-{new}>", key_up)
+        except tk.TclError:
+            pass
+    bind_ptt_key(prefs["ptt_key"])
     ring = {"win": None, "after": None}
 
     def bar(level, total=8):
@@ -2906,12 +3162,14 @@ def main(args=None):
     def show_call_bar():
         if not call_bar.winfo_ismapped():
             call_bar.pack(fill="x", padx=8, pady=(0, 4), before=f4)
+            refresh_ptt()
             call_tick()
 
     def hide_call_bar():
         call_bar.pack_forget()
         call_var.set("")
         mute_btn.config(text="mute")
+        ptt_set(False)
 
     def toggle_mute():
         node.calls.set_muted(not node.calls.muted)
@@ -2927,6 +3185,7 @@ def main(args=None):
         if ring["after"]:
             root.after_cancel(ring["after"])
             ring["after"] = None
+        sounds.stop()
 
     def incoming_dialog(fp):
         close_ring()
@@ -2958,7 +3217,10 @@ def main(args=None):
             if ring["win"] is win:
                 root.bell()
                 ring["after"] = root.after(1500, beep)
-        beep()
+        if sounds.enabled:
+            sounds.loop("ring")
+        else:
+            beep()
 
     def do_call():
         peers = list(node.chans)
@@ -2992,14 +3254,17 @@ def main(args=None):
         elif state == "ringing":
             log(f"Calling {who}...")
             show_call_bar()
+            sounds.loop("ringback")
         elif state == "active":
             close_ring()
+            sounds.play("connected")
             log(f"Call with {who} started ({detail})", "me")
             show_call_bar()
         elif state == "remote-mute":
             log(f"{who} muted their microphone" if detail else f"{who} unmuted")
         elif state in CALL_TEXT or state == "error":
             close_ring()
+            sounds.play("error" if state == "error" else "ended")
             hide_call_bar()
             log((f"Call error: {detail}" if state == "error" else f"{CALL_TEXT[state]} ({who})")
                 + (f" - {detail}" if detail and state != "error" else ""), "err" if state == "error" else "sys")
@@ -3419,6 +3684,49 @@ def main(args=None):
         duck_var = tk.BooleanVar(value=node.calls.duck)
         row(mk_check(win, "speakerphone mode (mute my microphone while the other side talks - avoids echo)", duck_var,
                      lambda: setattr(node.calls, "duck", duck_var.get())))
+        ptt_var = tk.BooleanVar(value=node.calls.ptt)
+
+        def ptt_toggle():
+            prefs["ptt"] = ptt_var.get()
+            node.calls.set_ptt(prefs["ptt"])
+            save_prefs()
+            if call_bar.winfo_ismapped():
+                refresh_ptt()
+        row(mk_check(win, "push to talk (the microphone only transmits while you hold the talk button or key)", ptt_var, ptt_toggle))
+        key_var = tk.StringVar(value=ptt["key"])
+
+        def pick_key(v):
+            prefs["ptt_key"] = v
+            bind_ptt_key(v)
+            save_prefs()
+        km = tk.OptionMenu(win, key_var, "F8", "F9", "F10", "Control_R", "Alt_R", "Pause", "Insert", command=pick_key)
+        km.config(bg=BTN, fg=FG, activebackground=FG, activeforeground=BG, font=FONT, relief="flat",
+                  highlightthickness=1, highlightbackground=DIM)
+        row(tk.Label(win, text="talk key (works while this window is focused)", bg=BG, fg=DIM, font=FONT), km)
+
+        def opt_volume(v):
+            prefs["volume"] = int(float(v))
+            node.calls.volume = prefs["volume"] / 100.0
+
+        def opt_gain(v):
+            prefs["mic_gain"] = int(float(v))
+            node.calls.mic_gain = prefs["mic_gain"] / 100.0
+        row(tk.Label(win, text="call volume %", bg=BG, fg=DIM, font=FONT), mk_scale(win, 0, 200, prefs["volume"], opt_volume))
+        row(tk.Label(win, text="microphone gain %", bg=BG, fg=DIM, font=FONT), mk_scale(win, 0, 300, prefs["mic_gain"], opt_gain))
+        section("sounds")
+        snd_var = tk.BooleanVar(value=sounds.enabled)
+
+        def snd_toggle():
+            sounds.enabled = prefs["sounds"] = snd_var.get()
+            if not sounds.enabled:
+                sounds.stop()
+            save_prefs()
+        row(mk_check(win, "play sounds (incoming message, new peer, file received, call ringing / connected / ended)", snd_var, snd_toggle))
+
+        def snd_volume(v):
+            sounds.volume = prefs["sound_volume"] = int(float(v))
+        row(tk.Label(win, text="sound volume %", bg=BG, fg=DIM, font=FONT), mk_scale(win, 0, 100, prefs["sound_volume"], snd_volume))
+        row(mk_btn(win, "test sound", lambda: sounds.play("message")))
         tk.Label(win, text="codec: " + ("Opus (best quality) with ADPCM fallback" if "opus" in call_codecs() else
                                          "ADPCM 16 kHz (Opus not installed)") + " - a call uses about 10 KB/s; use a headset",
                  bg=BG, fg=ACC, font=FONT, anchor="w", wraplength=560, justify="left").grid(
@@ -3596,12 +3904,14 @@ def main(args=None):
                     log(ev[1])
                 elif k == "msg":
                     log(f"{node.label(ev[1])}> {ev[2]}", tag_for(ev[1]))
+                    sounds.play("message")
                     notify()
                 elif k == "relayed":
                     via, origin, text = ev[1], ev[2], ev[3]
                     if origin != node.my_fp:
                         who = node.label(origin) if origin else "?"
                         log(f"{who} (via {node.label(via)})> {text}", tag_for(origin or via))
+                        sounds.play("message")
                         notify()
                 elif k == "connected":
                     fp = ev[1]
@@ -3616,6 +3926,7 @@ def main(args=None):
                     log(f"[+] {node.label(fp)} ({short(fp)}) connected securely", tag_for(fp))
                     stop_btn.config(state="normal")
                     status_var.set("online · " + ", ".join(node.label(f) for f in node.chans))
+                    sounds.play("peer")
                     notify()
                 elif k == "listening":
                     if not node.chans:
@@ -3648,6 +3959,7 @@ def main(args=None):
                 elif k == "file":
                     log(("[+] file received: " if ev[3] else "[!] DAMAGED file: ") + ev[2],
                         "me" if ev[3] else "err")
+                    sounds.play("file" if ev[3] else "error")
                     notify()
                 elif k == "confirm":
                     ok = messagebox.askyesno(

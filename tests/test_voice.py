@@ -319,4 +319,82 @@ A.calls.hangup(); wait(lambda: B.calls.state == "idle")
 for n in (A, B):
     n.shutdown()
 
+# ---------------------------------------------------------------- volume, push to talk, sounds
+loud = sine(500, m.CHUNK_SAMPLES, amp=10000)
+ok(m.scale_pcm(loud, 1.0) is loud, "gain 1.0 leaves the samples untouched")
+half = m.scale_pcm(loud, 0.5)
+ok(abs(m.pcm_level(half) * 2 - m.pcm_level(loud)) < 0.05 * m.pcm_level(loud), "gain 0.5 halves the level")
+clip = array.array("h"); clip.frombytes(m.scale_pcm(loud, 5.0))
+ok(max(clip) == 32767 and min(clip) == -32768 and len(clip) == m.CHUNK_SAMPLES, "gain above 1 clips instead of wrapping around")
+ok(m.pcm_level(m.scale_pcm(loud, 0.0)) == 0, "gain 0 is silence")
+
+A, B, fa, fb = setup_pair()
+A.calls.call(next(iter(A.chans))); wait(lambda: B.calls.state == "ringing-in"); B.calls.accept()
+wait(lambda: A.calls.active() and B.calls.active())
+wait(lambda: len(fb.rec) > 16000 * 2, 15)
+A.calls.set_ptt(True)
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.5)
+ok(power(bytes(fb.rec[mark:]), 600) < 1e6 or m.pcm_level(bytes(fb.rec[mark:])) < 200, "push to talk: nothing is sent while the key is up")
+A.calls.ptt_press(True)
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.5)
+seg = bytes(fb.rec[mark:])
+ok(power(seg, 600) > 20 * power(seg, 1100), "push to talk: the voice goes through while the key is down")
+A.calls.ptt_press(False)
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.2)
+ok(m.pcm_level(bytes(fb.rec[mark:])) < 200, "silent again after releasing the key")
+ok(B.calls.remote_muted is False, "push to talk does not show up as 'muted' on the other side")
+A.calls.set_ptt(False)
+B.calls.volume = 0.25
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.5)
+quiet = m.pcm_level(bytes(fb.rec[mark:]))
+B.calls.volume = 1.0
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.5)
+normal = m.pcm_level(bytes(fb.rec[mark:]))
+ok(quiet < normal * 0.5 and quiet > 0, f"call volume works ({quiet} vs {normal})")
+A.calls.mic_gain = 0.2
+time.sleep(0.6); mark = len(fb.rec)
+time.sleep(1.5)
+ok(m.pcm_level(bytes(fb.rec[mark:])) < normal * 0.5, "microphone gain works")
+A.calls.hangup(); wait(lambda: B.calls.state == "idle")
+ok(A.calls.ptt_down is False, "the talk key is released when the call ends")
+for n in (A, B):
+    n.shutdown()
+
+import io as _io
+import wave as _wave
+for name in m.SOUND_DEFS:
+    w = _wave.open(_io.BytesIO(m.make_sound(name, 70)))
+    secs = w.getnframes() / w.getframerate()
+    ok(w.getnchannels() == 1 and w.getsampwidth() == 2 and 0.1 < secs < 1.5, f"sound '{name}' is a valid short WAV ({secs:.2f} s)")
+quietwav = array.array("h"); quietwav.frombytes(_wave.open(_io.BytesIO(m.make_sound("message", 20))).readframes(10**6))
+loudwav = array.array("h"); loudwav.frombytes(_wave.open(_io.BytesIO(m.make_sound("message", 100))).readframes(10**6))
+ok(max(quietwav) * 3 < max(loudwav), "sound volume scales the amplitude")
+played = []
+snd = m.Sounds(True, 70, player=lambda wav: played.append(len(wav)))
+snd.play("message"); ok(wait(lambda: len(played) == 1, 3), "a sound is played")
+snd.enabled = False
+snd.play("message"); time.sleep(0.2)
+ok(len(played) == 1, "nothing plays when sounds are off")
+snd.enabled = True
+played.clear()
+m.SOUND_LOOPS["ring"] = 0.4
+snd.loop("ring"); time.sleep(1.6)
+ok(len(played) >= 3 and snd.looping() == "ring", f"the ring repeats ({len(played)} times)")
+snd.stop(); n_now = len(played); time.sleep(0.8)
+ok(len(played) <= n_now + 1 and snd.looping() is None, "stop() ends the ring")
+m.APP_DIR = tempfile.mkdtemp(prefix="mute_audio_")
+ok(m.load_audio_prefs() == m.AUDIO_PREFS_DEFAULT, "default audio preferences")
+pr = dict(m.AUDIO_PREFS_DEFAULT, ptt=True, ptt_key="F9", volume=150, sound_volume=30)
+m.save_audio_prefs(pr)
+ok(m.load_audio_prefs() == pr, "audio preferences are saved and loaded")
+with open(os.path.join(m.APP_DIR, "audio.json"), "w") as f:
+    f.write('{"volume": "loud", "ptt": 5, "mic_gain": 9999}')
+back = m.load_audio_prefs()
+ok(back["volume"] == 100 and back["ptt"] is False and back["mic_gain"] == 300, "bad preference values are ignored or clamped")
+
 print("all voice tests passed")
