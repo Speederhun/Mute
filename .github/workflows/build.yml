@@ -26,7 +26,7 @@ jobs:
     continue-on-error: ${{ matrix.os == 'macos-latest' }}   # a macOS test problem must not block the Windows/Linux releases
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Install pinned dependencies (hash-checked)
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install bandit pip-audit
@@ -67,7 +67,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
@@ -107,7 +107,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y python3-tk
@@ -146,7 +146,7 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
@@ -189,7 +189,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - uses: actions/setup-python@v5      # Chaquopy needs a Python 3.12 on the build machine
+      - uses: actions/setup-python@v7      # Chaquopy needs a Python 3.12 on the build machine
         with:
           python-version: "3.12"
       - uses: android-actions/setup-android@v3
