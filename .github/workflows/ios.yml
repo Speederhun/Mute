@@ -51,7 +51,7 @@ jobs:
           set -o pipefail
           xcodebuild -workspace Mute.xcworkspace -scheme Mute -sdk iphoneos -configuration Release \
             -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build.log | tail -n 100
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee build.log | tail -n 100
       - name: Pack the .ipa
         working-directory: ios
         run: |
