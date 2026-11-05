@@ -1,6 +1,6 @@
 name: ios-build
 
-# Compiles the iOS app for the simulator (no signing) so build errors show up in the log.
+# Compiles the iOS app for the simulator (ad-hoc signature, no Apple account) so build errors show up in the log.
 on:
   workflow_dispatch:
   push:
@@ -25,7 +25,7 @@ jobs:
           set -o pipefail
           xcodebuild -workspace Mute.xcworkspace -scheme Mute -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' -configuration Debug \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | tail -n 200
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build.log | tail -n 200
       - name: Keep the build log
         if: always()
         uses: actions/upload-artifact@v4
