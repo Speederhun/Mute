@@ -1,0 +1,10 @@
+Support/
+app/
+app_packages.iphoneos/
+app_packages.iphonesimulator/
+Pods/
+Mute.xcodeproj/
+Mute.xcworkspace/
+build/
+*.xcuserstate
+xcuserdata/

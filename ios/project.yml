@@ -1,0 +1,68 @@
+# Generated Xcode project: run ./setup.sh once (it installs the Python runtime, then runs xcodegen and pod install).
+name: Mute
+options:
+  bundleIdPrefix: hu.speeder
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.2.1"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Mute:
+    type: application
+    platform: iOS
+    sources:
+      - path: Mute
+    dependencies:
+      - framework: Support/Python.xcframework
+        embed: true
+        codeSign: true
+    info:
+      path: Mute/Info.plist
+      properties:
+        CFBundleDisplayName: Mute
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: Mute connects directly to people on your local network.
+        NSFaceIDUsageDescription: Mute can unlock with Face ID.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: hu.speeder.mute
+        SWIFT_OBJC_BRIDGING_HEADER: Mute/Mute-Bridging-Header.h
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ENABLE_BITCODE: NO
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Mute/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # the Python.xcframework header lives inside the framework slice
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(PROJECT_DIR)/Support/Python.xcframework/ios-arm64 $(PROJECT_DIR)/Support/Python.xcframework/ios-arm64_x86_64-simulator"
+    preBuildScripts:
+      - name: Copy app code
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          # app/ is a staging folder (git-ignored): the shared Python code of all platforms
+          rm -rf "$PROJECT_DIR/app"
+          mkdir -p "$PROJECT_DIR/app"
+          cp "$PROJECT_DIR/../mute.py" "$PROJECT_DIR/app/"
+          cp "$PROJECT_DIR/../android/python/android_bridge.py" "$PROJECT_DIR/app/"
+          cp -R "$PROJECT_DIR/../android/python/stem" "$PROJECT_DIR/app/"
+          cp "$PROJECT_DIR/python/ios_entry.py" "$PROJECT_DIR/app/"
+          find "$PROJECT_DIR/app" -name __pycache__ -prune -exec rm -rf {} +
+    postCompileScripts:
+      - name: Install Python
+        basedOnDependencyAnalysis: false
+        script: |
+          set -e
+          source "$PROJECT_DIR/Support/Python.xcframework/build/utils.sh"
+          if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then PKGS=app_packages.iphonesimulator; else PKGS=app_packages.iphoneos; fi
+          # copies the standard library and turns every binary module into a signed framework
+          install_python Support/Python.xcframework app "$PKGS"
