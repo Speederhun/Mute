@@ -39,6 +39,10 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         ENABLE_BITCODE: NO
+        # the Python install script cannot handle a fat simulator build ("lib-arm64 x86_64"): one architecture at a time
+        ARCHS: arm64
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+        ONLY_ACTIVE_ARCH: YES
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Mute/Info.plist
         TARGETED_DEVICE_FAMILY: "1,2"
