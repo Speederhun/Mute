@@ -28,7 +28,7 @@ jobs:
             ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build.log | tail -n 200
       - name: Keep the build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-build-log
           path: ios/build.log
@@ -58,7 +58,7 @@ jobs:
           rm -rf Payload && mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/Mute.app Payload/
           zip -qry Mute-ios-unsigned.ipa Payload
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Mute-ios-unsigned
           path: ios/Mute-ios-unsigned.ipa
