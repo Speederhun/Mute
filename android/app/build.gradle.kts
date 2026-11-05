@@ -25,10 +25,30 @@ android {
         }
     }
 
+    // Release signing comes from the environment (CI sets it from repository secrets). Without it the APK is signed
+    // with the debug key so it still installs. A fixed key matters for updates: Android only updates an app in place
+    // when the new APK is signed with the same key as the installed one.
+    val releaseKeystore = System.getenv("MUTE_KEYSTORE")?.let { File(it) }
+    signingConfigs {
+        if (releaseKeystore != null && releaseKeystore.exists()) {
+            create("mute") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("MUTE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("MUTE_KEY_ALIAS") ?: "mute"
+                keyPassword = System.getenv("MUTE_KEY_PASSWORD") ?: System.getenv("MUTE_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("mute") ?: signingConfigs.getByName("debug")
         }
+    }
+
+    lint {
+        checkReleaseBuilds = false
     }
 
     compileOptions {

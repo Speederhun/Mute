@@ -208,6 +208,36 @@ ok(rel["name"] == "Anna", "relay: the hub's nickname for the sender arrives (%s)
 for pmp in (ph, px, py):
     pmp.running = False
 
+# ---- iOS: attach to a Tor that the app runs itself (fake control port), and the Swift entry point
+import types as _types
+import stem.control as _sc
+_real_from_port = _sc.Controller.from_port
+class _FakeCtl:
+    def authenticate(self): pass
+    def create_ephemeral_hidden_service(self, ports, **kw):
+        return _types.SimpleNamespace(service_id="a" * 56)
+    def close(self): pass
+    def get_info(self, key, default=None): return 'NOTICE BOOTSTRAP PROGRESS=100 TAG=done SUMMARY="Done"'
+    def msg(self, cmd): raise AssertionError("unexpected control command")
+_sc.Controller.from_port = staticmethod(lambda port=None, **kw: _FakeCtl())
+T = ab.Bridge(os.path.join(TMP, "t"), os.path.join(TMP, "t_dl"), burner=True)
+st = json.loads(T.start_tor_external(9050, 9051))
+ok(st["transport"] == "tor" and st["onion"] == "a" * 56 + ".onion:5555", "start_tor_external publishes the onion through the app's Tor")
+ok(T.node.socks_port == 9050, "start_tor_external uses the app's SOCKS port")
+T.shutdown()
+_sc.Controller.from_port = _real_from_port
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ios", "python"))
+import ios_entry as ie
+r = json.loads(ie.call("init", json.dumps([{"app_dir": os.path.join(TMP, "ie"), "download_dir": os.path.join(TMP, "ie_dl"), "burner": True}])))
+ok(r == {"ok": True}, "ios_entry init")
+stj = json.loads(json.loads(ie.call("state", "[]"))["ok"])
+ok(len(stj["fp"]) > 10 and stj["transport"] == "direct", "ios_entry state returns the bridge JSON")
+ok(json.loads(ie.call("poll", "[50]"))["ok"] is not None, "ios_entry poll works")
+ok("error" in json.loads(ie.call("nonsense", "[]")), "ios_entry reports unknown methods as an error")
+ok("error" in json.loads(ie.call("configure", json.dumps(["{not json"]))), "ios_entry turns exceptions into error JSON")
+ie.call("drop", "[]")
+
 # ---- pause / resume / speed limit / folder transfer
 F1.configure(json.dumps({"speed_limit_kbs": 0}))
 F1.pause_transfers()

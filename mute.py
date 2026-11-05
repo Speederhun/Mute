@@ -1125,6 +1125,41 @@ class Node:
         self._launch_tor(tor_cmd, torrc)
         self.controller = stem.control.Controller.from_port(port=ctrl)
         self.controller.authenticate()
+        self._publish_onion(local_port)
+
+    def attach_tor(self, socks_port, ctrl_port, local_port):
+        """Uses a Tor that the host app already runs inside its own process (iOS cannot start
+        programs): no subprocess and no torrc, only the control port and the SOCKS port."""
+        import stem.control
+        self.stop_requested.clear()
+        self.socks_port = int(socks_port)
+        self.controller = stem.control.Controller.from_port(port=int(ctrl_port))
+        self.controller.authenticate()
+        self.emit("sys", "Using the Tor built into the app")
+        self._wait_bootstrap()
+        self._publish_onion(local_port)
+
+    def _wait_bootstrap(self, timeout=240):
+        """Waits until the (already running) Tor reports 100% bootstrap, reporting the progress."""
+        end, last = time.time() + timeout, -1
+        while time.time() < end:
+            if self.stop_requested.is_set():
+                raise RuntimeError("Stopped")
+            try:
+                info = self.controller.get_info("status/bootstrap-phase")
+            except Exception:
+                info = ""
+            m = re.search(r"PROGRESS=(\d+)", info or "")
+            pct = int(m.group(1)) if m else 0
+            if pct != last:
+                last = pct
+                self.emit("sys", f"Bootstrapped {pct}%")
+            if pct >= 100:
+                return
+            time.sleep(1)
+        raise RuntimeError("Tor did not finish starting within %d seconds (check the network)" % timeout)
+
+    def _publish_onion(self, local_port):
         if self.allowed_clients:
             # stem only accepts one client key and cannot set the V3Auth flag, so use the raw command
             cmd = (f"ADD_ONION NEW:ED25519-V3 Flags=DiscardPK,V3Auth Port={DEFAULT_PORT},{local_port} "

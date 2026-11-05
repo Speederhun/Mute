@@ -29,6 +29,30 @@ Tor comes from Briar's JARs (`org.briarproject:tor-android`, `obfs4proxy-android
 They are executables packaged as `lib*.so`; the app starts them as child processes exactly like the desktop version
 does. Versions are set in `gradle.properties` (`+` = newest; pin them after the first good build).
 
+## Download and install (no build needed)
+
+Every `android-vX.Y.Z` release on the repository's Releases page carries `Mute-android.apk` (built by GitHub Actions,
+with build provenance and `SHA256SUMS-android.txt`). On the phone: download the APK, open it, allow "install from this source"
+once, tap Install. Needs Android 7.0+ on a 64-bit phone.
+
+## Make a release (maintainers)
+
+```bash
+git tag android-v1.2.1 && git push origin android-v1.2.1     # or a normal vX.Y.Z tag, which builds every platform
+```
+
+Signing: Android only updates an app in place when the new APK has the same signing key. Create a key once and store it as
+repository secrets, then every release is signed with it:
+
+```bash
+keytool -genkeypair -v -keystore mute.jks -alias mute -keyalg RSA -keysize 4096 -validity 36500
+base64 -w0 mute.jks        # paste into the secret MUTE_KEYSTORE_B64
+```
+
+Secrets: `MUTE_KEYSTORE_B64`, `MUTE_KEYSTORE_PASSWORD`, `MUTE_KEY_ALIAS` (default `mute`), `MUTE_KEY_PASSWORD`.
+Keep `mute.jks` somewhere safe and never commit it. Without the secrets the workflow signs with a debug key, which
+installs fine but changes between builds, so updates then need an uninstall first.
+
 ## Test the Python side without a phone
 
 ```bash

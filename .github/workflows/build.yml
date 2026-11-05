@@ -6,7 +6,7 @@ name: build
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: ["v*", "android-v*"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -170,6 +170,58 @@ jobs:
             dist/Mute-macos.zip
             dist/Mute-macos-installer.zip
 
+  android:
+    needs: test
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write       # lets GitHub sign where the build came from
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5      # Chaquopy needs a Python 3.12 on the build machine
+        with:
+          python-version: "3.12"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Signing key (only if the repository secrets exist)
+        env:
+          KEYSTORE_B64: ${{ secrets.MUTE_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mute.jks"
+            echo "MUTE_KEYSTORE=$RUNNER_TEMP/mute.jks" >> "$GITHUB_ENV"
+            echo "Using the release signing key from the repository secrets"
+          else
+            echo "No MUTE_KEYSTORE_B64 secret: the APK is signed with a throw-away debug key (see android/README.md)"
+          fi
+      - name: Build the APK
+        working-directory: android
+        env:
+          MUTE_KEYSTORE_PASSWORD: ${{ secrets.MUTE_KEYSTORE_PASSWORD }}
+          MUTE_KEY_ALIAS: ${{ secrets.MUTE_KEY_ALIAS }}
+          MUTE_KEY_PASSWORD: ${{ secrets.MUTE_KEY_PASSWORD }}
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace
+          mkdir -p ../dist
+          cp app/build/outputs/apk/release/*.apk ../dist/Mute-android.apk
+          ls -l ../dist
+      - name: Attest build provenance (release runs only)
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/Mute-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mute-android
+          path: dist/Mute-android.apk
+
   release-windows:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: windows
@@ -245,4 +297,37 @@ jobs:
             **macOS build.** `Mute-macos.zip` contains the unsigned `Mute.app` (first start: right-click > Open, or `xattr -dr com.apple.quarantine Mute.app`).
             `Mute-macos-installer.zip`: unzip and run `bash macos/install.sh` - uses Homebrew for Python and Tor.
             Verify: `gh attestation verify Mute-macos.zip --repo Speederhun/Mute` (proves it was built by this repository's workflow), and compare the SHA-256 in `SHA256SUMS-macos.txt`. Not audited, see SECURITY.md.
+          files: artifacts/*
+
+  release-android:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/android-v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mute-android
+          path: artifacts
+      - name: Release tag
+        id: tag
+        run: |
+          V="${{ inputs.version || github.ref_name }}"
+          V="${V#android-}"
+          echo "name=android-$V" >> "$GITHUB_OUTPUT"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS-android.txt && cat SHA256SUMS-android.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          name: Mute ${{ steps.tag.outputs.version }} for Android
+          generate_release_notes: true
+          body: |
+            **Android app** (Android 7.0 or newer, 64-bit phones: arm64 or x86_64). Download `Mute-android.apk` on your phone and open it.
+            Android asks you to allow installing from this source once (Settings > Apps > Special access > Install unknown apps). Then tap Install.
+            DIRECT and TOR modes, the same protocol as the desktop version (they can talk to each other). The app contains its own Tor, nothing else to install.
+            Verify: `gh attestation verify Mute-android.apk --repo Speederhun/Mute` (proves it was built by this repository's workflow), and compare the SHA-256 in `SHA256SUMS-android.txt`. Not audited, see SECURITY.md. Details: `android/README.md`.
           files: artifacts/*

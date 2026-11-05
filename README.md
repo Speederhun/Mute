@@ -43,9 +43,9 @@ No account, no server, no logs. Connect by exchanging an address (IP or `.onion`
 
 ## Download
 
-Each platform has its **own release** on the [Releases page](../../releases): `windows-vX.Y.Z`, `linux-vX.Y.Z`, `macos-vX.Y.Z`.
+Each platform has its **own release** on the [Releases page](../../releases): `windows-vX.Y.Z`, `linux-vX.Y.Z`, `macos-vX.Y.Z`, `android-vX.Y.Z`.
 Every release contains the binaries for that system, an installer pack (installs Python/Tor if needed) and SHA-256 checksums.
-They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.2.1 && git push origin v1.2.1`), or manually:
+They are built by GitHub Actions when a `vX.Y.Z` tag is pushed (`git tag v1.2.1 && git push origin v1.2.1`; an Android-only release: `git tag android-v1.2.1 && git push origin android-v1.2.1`), or manually:
 **Actions > build > Run workflow**, enter a version such as `v1.2.1`.
 
 ### Verify your download
@@ -96,6 +96,28 @@ Or install it as a command with [pipx](https://pipx.pypa.io/) (no venv to manage
 pipx install git+https://github.com/Speederhun/Mute-.git
 mute            # GUI        mute --listen   # terminal
 ```
+
+## Android app
+
+An Android version with the same protocol as the desktop app (the two can talk to each other): chat, files and folders, DIRECT and TOR
+(Tor is built into the app, nothing else to install), group chat, closed mode, shared secret, cover and constant-rate traffic, themes, lock screen.
+Screenshots and the recent-apps preview are blocked inside the app.
+
+**Install**
+
+1. On your phone open the [Releases page](../../releases) and download `Mute-android.apk` from the newest **`android-v…`** release.
+2. Open the file. Android asks once to allow installing apps from that source (browser or file manager): allow it. Tap **Install**.
+3. Open **Mute**, pick **DIRECT** or **TOR**, tap **START**. Use the **Connect** tab to enter the other person's address and the **SHARE** button to send yours.
+
+Needs Android 7.0 or newer on a 64-bit phone (arm64 or x86_64). Play Protect may say the app is unknown: it is not from the Play Store, so choose "Install anyway".
+Check the download like the desktop files (`gh attestation verify Mute-android.apk --repo Speederhun/Mute`, or the SHA-256 in `SHA256SUMS-android.txt`).
+
+**Updating:** install the newer APK over the old one; your identity and settings stay. This only works when both APKs are signed with the same key.
+Builds from this repository's workflow use the key stored in the repository secrets (see [android/README.md](android/README.md)); if a build says
+"App not installed" or "conflicts with an existing package", uninstall the old app first (this deletes the app's identity key; copy it first if you need it).
+
+Not in the Android app yet: message notifications, Tor bridges (pasted or fetched with the Moat captcha) and onion client keys.
+Build from source: [android/README.md](android/README.md).
 
 ## How to connect
 
@@ -276,6 +298,7 @@ requirements.txt    dependency ranges
 requirements.lock   pinned dependencies with hashes (pip install --require-hashes -r requirements.lock)
 SECURITY.md         how to report problems, what is and is not tested
 windows/ linux/ macos/   per-platform guides and build scripts
+android/            Android app (Chaquopy + Jetpack Compose); runs mute.py unchanged
 tests/              scrubbing, loopback network/crypto, fuzz tests
 docs/               screenshots
 .github/            CI (test matrix, security checks, per-platform builds) and Dependabot

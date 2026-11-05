@@ -1,4 +1,4 @@
-"""Headless bridge between the Android app (Kotlin, via Chaquopy) and mute.Node.
+"""Headless bridge between the mobile apps (Android: Kotlin via Chaquopy; iOS: Swift via ios/python/ios_entry.py) and mute.Node.
 
 mute.py itself is used unchanged: this module only
   * points its storage directories at the app's private storage,
@@ -227,6 +227,13 @@ class Bridge:
             raise RuntimeError("The Tor binary is not inside the app (libtor.so missing). "
                                "Native library folder %s contains: %s" % (d, files))
         self.node.start_tor(lp)
+        self.node.listen(lp, local_only=True)
+        return self.state()
+
+    def start_tor_external(self, socks_port, ctrl_port):
+        """iOS: the app runs Tor inside its own process; publish an onion service through its control port."""
+        lp = mute.free_port()
+        self.node.attach_tor(int(socks_port), int(ctrl_port), lp)
         self.node.listen(lp, local_only=True)
         return self.state()
 
