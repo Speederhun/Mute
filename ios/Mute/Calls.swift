@@ -190,7 +190,9 @@ struct CallPanel: View {
                     }
                     Button { ctl.toggleSpeaker() } label: {
                         Label("Speaker", systemImage: call.speaker ? "speaker.wave.3.fill" : "speaker.fill").frame(maxWidth: .infinity)
-                    }.buttonStyle(call.speaker ? .borderedProminent : .bordered)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(call.speaker ? ctl.theme.acc : nil)
                     Button { ctl.hangUp() } label: { Label("Hang up", systemImage: "phone.down.fill").frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).tint(ctl.theme.red)
                 }
