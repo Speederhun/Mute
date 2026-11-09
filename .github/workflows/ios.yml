@@ -10,7 +10,7 @@ jobs:
   ios:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -47,7 +47,7 @@ jobs:
     # Unsigned device build packed as an .ipa: install it on an iPhone with Sideloadly or AltStore (they sign it with your Apple ID).
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
