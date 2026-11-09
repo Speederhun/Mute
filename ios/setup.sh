@@ -13,21 +13,36 @@ PYVER="${PYVER:-3.13}"
 # 1. Python runtime for iOS (BeeWare Python-Apple-support) -> Support/Python.xcframework
 if [ ! -d Support/Python.xcframework ]; then
   echo "Looking for the newest Python $PYVER iOS support package..."
-  URL=$($PY - "$PYVER" <<'PYEOF'
+  # newest package for this Python version; the API call uses GH_TOKEN when there is one (the shared CI IPs hit the anonymous rate limit),
+  # and a known-good package is the fallback if the API cannot be reached at all
+  FALLBACK_URL="https://github.com/beeware/Python-Apple-support/releases/download/3.13-b18/Python-3.13-iOS-support.b18.tar.gz"
+  URL=$($PY - "$PYVER" "${GH_TOKEN:-}" <<'PYEOF' || true
 import json, sys, urllib.request
-ver = sys.argv[1]
-req = urllib.request.Request("https://api.github.com/repos/beeware/Python-Apple-support/releases?per_page=100",
-                             headers={"User-Agent": "mute-setup"})
-for rel in json.load(urllib.request.urlopen(req)):
-    if not rel["tag_name"].startswith(ver + "-"):
-        continue
-    for a in rel["assets"]:
-        if "iOS-support" in a["name"] and a["name"].endswith(".tar.gz"):
-            print(a["browser_download_url"])
-            sys.exit(0)
-sys.exit("no iOS support package found for Python " + ver)
+ver, token = sys.argv[1], sys.argv[2]
+headers = {"User-Agent": "mute-setup"}
+if token:
+    headers["Authorization"] = "Bearer " + token
+try:
+    req = urllib.request.Request("https://api.github.com/repos/beeware/Python-Apple-support/releases?per_page=100", headers=headers)
+    for rel in json.load(urllib.request.urlopen(req, timeout=60)):
+        if not rel["tag_name"].startswith(ver + "-"):
+            continue
+        for a in rel["assets"]:
+            if "iOS-support" in a["name"] and a["name"].endswith(".tar.gz"):
+                print(a["browser_download_url"])
+                sys.exit(0)
+except Exception as e:
+    print("release lookup failed: %s" % e, file=sys.stderr)
 PYEOF
 )
+  if [ -z "$URL" ]; then
+    if [ "$PYVER" = "3.13" ]; then
+      echo "Using the known package $FALLBACK_URL"
+      URL="$FALLBACK_URL"
+    else
+      echo "no iOS support package found for Python $PYVER"; exit 1
+    fi
+  fi
   echo "Downloading $URL"
   mkdir -p Support
   # download to a file first, with retries (GitHub sometimes answers 5xx), then unpack
