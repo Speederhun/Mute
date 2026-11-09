@@ -335,7 +335,7 @@ private fun ChatScreen(s: UiState) {
                     s, theme, onConnect = { tab = Tab.CONNECT }, onRename = { renaming = it },
                     onCall = { p -> withMic { MuteController.startCall(p.fp) } },
                 )
-                Tab.CONNECT -> ConnectTab(s, theme)
+                Tab.CONNECT -> ConnectTab(s, theme, onConnect = { tab = Tab.CHAT })
                 Tab.FILES -> FilesTab(s, theme)
                 Tab.SETTINGS -> SettingsTab(s)
             }
@@ -481,7 +481,7 @@ private fun ChatTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit, onRen
 
 // ---- Connect tab: connect to a peer, and what to send them
 @Composable
-private fun ConnectTab(s: UiState, theme: ThemeColors) {
+private fun ConnectTab(s: UiState, theme: ThemeColors, onConnect: () -> Unit) {
     val ctx = LocalContext.current
     var addr by remember { mutableStateOf("") }
     var peerFp by remember { mutableStateOf("") }
@@ -523,7 +523,7 @@ private fun ConnectTab(s: UiState, theme: ThemeColors) {
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(
-                onClick = { MuteController.connect(addr, peerFp); addr = "" },
+                onClick = { MuteController.connect(addr, peerFp); addr = ""; onConnect() },
                 enabled = addr.isNotBlank(), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth(),
             ) { Text("CONNECT", fontWeight = FontWeight.Bold) }
         }

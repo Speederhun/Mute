@@ -28,7 +28,7 @@ struct ChatRoot: View {
             Group {
                 switch tab {
                 case .chat: ChatTab()
-                case .connect: ConnectTab()
+                case .connect: ConnectTab(onConnect: { tab = .chat })
                 case .files: FilesTab()
                 case .settings: SettingsTab()
                 }
@@ -205,6 +205,8 @@ struct ChatTab: View {
 
 struct ConnectTab: View {
     @EnvironmentObject var ctl: MuteController
+    /// Called after CONNECT is pressed: the app jumps to the Chat tab so the progress is visible.
+    var onConnect: () -> Void = {}
     @State private var address = ""
     @State private var expected = ""
     @State private var renaming: Peer?
@@ -265,6 +267,7 @@ struct ConnectTab: View {
                     Button {
                         ctl.connect(address.trimmingCharacters(in: .whitespacesAndNewlines),
                                     fingerprint: expected.trimmingCharacters(in: .whitespacesAndNewlines))
+                        onConnect()
                     } label: { Text("CONNECT").bold().frame(maxWidth: .infinity) }
                         .buttonStyle(.borderedProminent).controlSize(.large)
                         .disabled(address.trimmingCharacters(in: .whitespaces).isEmpty)
