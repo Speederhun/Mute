@@ -31,7 +31,12 @@ PYEOF
   echo "Downloading $URL"
   mkdir -p Support
   # download to a file first, with retries (GitHub sometimes answers 5xx), then unpack
-  curl -L --fail --retry 6 --retry-all-errors --retry-delay 10 -o Support/python-support.tar.gz "$URL"
+  if ! curl -L --fail --retry 6 --retry-all-errors --retry-delay 10 -o Support/python-support.tar.gz "$URL"; then
+    # the CDN sometimes keeps answering 5xx: fetch the same release asset through the GitHub API instead
+    echo "curl failed - trying gh release download"
+    TAG=$(printf '%s' "$URL" | sed -E 's#.*/download/([^/]+)/.*#\1#')
+    gh release download "$TAG" -R beeware/Python-Apple-support -p "$(basename "$URL")" -O Support/python-support.tar.gz --clobber
+  fi
   tar -xzf Support/python-support.tar.gz -C Support
   rm -f Support/python-support.tar.gz
 fi

@@ -16,8 +16,18 @@ jobs:
           python-version: "3.12"
       - name: Tools
         run: brew install xcodegen cocoapods
+      - name: Cache the Python runtime and wheels
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Support
+            ios/app_packages.iphoneos
+            ios/app_packages.iphonesimulator
+          key: ios-python-${{ hashFiles('ios/setup.sh') }}
       - name: Set up project (Python runtime, wheels, xcodegen, pods)
         working-directory: ios
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./setup.sh
       - name: Build for the simulator
         working-directory: ios
@@ -42,8 +52,18 @@ jobs:
         with:
           python-version: "3.12"
       - run: brew install xcodegen cocoapods
+      - name: Cache the Python runtime and wheels
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Support
+            ios/app_packages.iphoneos
+            ios/app_packages.iphonesimulator
+          key: ios-python-${{ hashFiles('ios/setup.sh') }}
       - name: Set up project
         working-directory: ios
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: ./setup.sh
       - name: Build for devices
         working-directory: ios
