@@ -63,6 +63,8 @@ final class MuteController: ObservableObject {
     @Published var confirm: ConfirmRequest?
     @Published var transfer: Transfer?
     @Published var namePrompt: Peer?
+    @Published var call: CallUi?
+    @Published var audio = AudioPrefs()
 
     // look and settings
     @Published var theme = ThemeColors.ice
@@ -158,8 +160,10 @@ final class MuteController: ObservableObject {
             do {
                 try Py.call("init", [kw])
                 try Py.call("configure", [jsonString(o.json(prev: nil))])
+                let prefs = (try? Py.dict("audio_prefs")) ?? [:]
                 await MainActor.run {
                     guard let self else { return }
+                    self.audio = AudioPrefs(prefs)
                     self.applied = o
                     self.lastTouch = Date()
                     self.startPolling()
@@ -205,6 +209,7 @@ final class MuteController: ObservableObject {
         confirm = nil
         transfer = nil
         namePrompt = nil
+        endCallLocally()
         onion = nil
         listening = false
         options = OptionsState()
@@ -270,10 +275,16 @@ final class MuteController: ObservableObject {
             addLine(who: "", text: ev.str("text"), kind: .sys)
         case "msg":
             addLine(who: ev.str("name"), text: ev.str("text"), kind: .peer, color: colorOf(ev.str("fp")))
+            if audio.sounds { Sounds.shared.play("message", volume: audio.soundVolume) }
+        case "call":
+            onCallEvent(state: ev.str("state"), fp: ev.str("fp"), name: ev.str("name"), detail: ev.str("detail"))
+        case "audio":
+            onAudioEvent(ev.str("action"))
         case "relayed":
             addLine(who: ev.str("name"), text: ev.str("text"), kind: .peer, color: colorOf(ev.str("fp")), via: ev.str("via"))
         case "connected":
             addLine(who: "", text: "\(ev.str("name")) connected securely", kind: .sys)
+            if audio.sounds { Sounds.shared.play("peer", volume: audio.soundVolume) }
             let fp = ev.str("fp")
             refreshState { [weak self] in
                 guard let self else { return }
@@ -286,6 +297,7 @@ final class MuteController: ObservableObject {
         case "file":
             let name = (ev.str("path") as NSString).lastPathComponent
             addLine(who: "", text: ev.bool("ok") ? "received \(name)" : "transfer failed: \(name)", kind: .file)
+            if ev.bool("ok"), audio.sounds { Sounds.shared.play("file", volume: audio.soundVolume) }
         case "progress":
             let total = ev.dbl("total"), done = ev.dbl("done")
             transfer = (total > 0 && done < total) ? Transfer(label: ev.str("label"), done: done, total: total) : nil

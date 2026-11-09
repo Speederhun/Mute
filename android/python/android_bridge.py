@@ -108,6 +108,11 @@ def _patch_tor_lookup(tor_cmd, pt_dir):
         mute.find_pt = find_pt
 
 
+def sound_wav_b64(name, volume=70):
+    """One of the small notification sounds as a base64 WAV (the iOS app plays it)."""
+    return base64.b64encode(mute.make_sound(name, int(volume))).decode("ascii")
+
+
 class _AndroidAudio:
     """Audio backend for mute.CallManager. Kotlin owns AudioRecord/AudioTrack and moves the samples:
     it pushes microphone blocks with Bridge.audio_in() and pulls playback blocks with Bridge.audio_out();
@@ -361,6 +366,15 @@ class Bridge:
         a = self._audio
         if a:
             a[0](array.array("b", samples).tobytes())
+
+    def audio_in_b64(self, b64):
+        """Same as audio_in, for callers that cannot pass raw bytes (iOS): one microphone block as base64 text."""
+        a = self._audio
+        if a:
+            a[0](base64.b64decode(b64))
+
+    def audio_out_b64(self):
+        return base64.b64encode(self.audio_out()).decode("ascii")
 
     def audio_out(self):
         """Python -> Kotlin: one playback block (bytes; silence when no call is running)."""

@@ -367,3 +367,14 @@ for p in (pa, pb, pc, pd):
 for b in (A, B, C, D):
     b.shutdown()
 print("ALL OK")
+
+
+# ---- iOS-style base64 audio helpers and sound generation
+import base64 as _b64
+import android_bridge as _ab
+_w = _b64.b64decode(_ab.sound_wav_b64("ring", 50))
+assert _w[:4] == b"RIFF" and _w[8:12] == b"WAVE", "sound_wav_b64 must return a WAV"
+_o = _b64.b64decode(A.audio_out_b64())
+assert len(_o) == _ab.mute.CHUNK_BYTES, "audio_out_b64 gives one 640-byte block"
+A.audio_in_b64(_b64.b64encode(bytes(_ab.mute.CHUNK_BYTES)).decode())    # no call running: must not raise
+print("ok  ios base64 audio helpers")

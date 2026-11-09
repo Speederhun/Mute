@@ -42,6 +42,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: Mute connects directly to people on your local network.
         NSFaceIDUsageDescription: Mute can unlock with Face ID.
+        NSMicrophoneUsageDescription: Mute uses the microphone for voice calls.
+        UIBackgroundModes: [audio]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: hu.speeder.mute

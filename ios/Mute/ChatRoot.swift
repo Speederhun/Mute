@@ -118,6 +118,19 @@ struct ChatTab: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if let c = ctl.call { CallPanel(call: c) }
+            else if !ctl.peers.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(ctl.peers) { p in
+                            Button { ctl.startCall(p.fp) } label: {
+                                Label(p.name.isEmpty ? "peer" : p.name, systemImage: "phone.fill").font(.system(size: 13))
+                            }.buttonStyle(.bordered).tint(ctl.theme.peerColor(p.color))
+                        }
+                    }.padding(.horizontal, 12).padding(.vertical, 6)
+                }
+                .background(ctl.theme.chat)
+            }
             if ctl.options.relay || ctl.peers.count > 1 {
                 Text(ctl.options.relay
                      ? "You are the relay hub: messages are passed between all connected peers."
@@ -380,6 +393,8 @@ struct SettingsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 OptionsForm(tor: ctl.transport == "tor", saveTheme: !(ctl.burner || ctl.options.amnesia))
+
+                VoiceSettings()
 
                 if ctl.transport == "tor" {
                     SectionCard(title: "ONION CLIENT KEY") {

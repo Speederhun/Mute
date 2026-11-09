@@ -23,12 +23,15 @@ _lock = threading.Lock()
 
 _MODULE_FUNCS = {
     "identity_state", "check_passphrase", "themes", "cover_profiles", "shape_labels",
-    "shape_estimate", "moat_captcha", "moat_solve", "moat_builtin",
+    "shape_estimate", "moat_captcha", "moat_solve", "moat_builtin", "sound_wav_b64",
 }
 _BRIDGE_METHODS = {
     "state", "configure", "queue", "start_direct", "start_tor_external", "connect", "set_closed",
     "allow", "set_psk", "send_text", "send_file", "name_peer", "pause_transfers", "resume_transfers",
     "cancel_transfers", "poll", "answer_confirm", "shutdown",
+    # voice calls, push to talk, volume and sound settings
+    "set_mic_permission", "call_peer", "call_accept", "call_reject", "call_hangup", "call_mute", "call_duck",
+    "call_ptt", "call_info", "audio_prefs", "set_audio_prefs", "audio_in_b64", "audio_out_b64",
 }
 
 
