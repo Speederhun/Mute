@@ -66,6 +66,11 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           set -e
+          # unsigned sideload build: no identity is set, so sign the Python frameworks ad hoc (Sideloadly / AltStore re-sign the whole app anyway)
+          if [ -z "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+            export EXPANDED_CODE_SIGN_IDENTITY="-"
+            export EXPANDED_CODE_SIGN_IDENTITY_NAME="ad hoc"
+          fi
           source "$PROJECT_DIR/Support/Python.xcframework/build/utils.sh"
           if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then PKGS=app_packages.iphonesimulator; else PKGS=app_packages.iphoneos; fi
           # copies the standard library and turns every binary module into a signed framework
