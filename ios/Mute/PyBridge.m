@@ -49,6 +49,24 @@ static NSString *statusMessage(PyStatus status) {
     PyConfig_Clear(&config);
     if (PyStatus_Exception(status)) return statusMessage(status);
 
+    // make sure the app code and the packages are on sys.path (the path list given to the configuration can be recomputed
+    // during initialisation, so add them to the live sys.path as well)
+    {
+        PyObject *sysPath = PySys_GetObject("path");     // borrowed reference
+        if (sysPath && PyList_Check(sysPath)) {
+            for (NSString *name in extra) {
+                NSString *dir = [bundlePath stringByAppendingPathComponent:name];
+                BOOL isDir = NO;
+                if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) continue;
+                PyObject *entry = PyUnicode_FromString(dir.UTF8String);
+                if (!entry) { PyErr_Clear(); continue; }
+                int present = PySequence_Contains(sysPath, entry);
+                if (present == 0) PyList_Insert(sysPath, 0, entry);
+                Py_DECREF(entry);
+            }
+        }
+    }
+
     PyObject *module = PyImport_ImportModule("ios_entry");
     if (!module) {
         // say what went wrong: the Python error text (usually "No module named ...") and what the bundle contains
@@ -67,8 +85,16 @@ static NSString *statusMessage(PyStatus status) {
         NSError *err = nil;
         NSArray *appFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app"] error:&err];
         NSArray *pkgFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app_packages"] error:&err];
-        NSString *msg = [NSString stringWithFormat:@"Could not import ios_entry:\n%@\n\napp/: %@\napp_packages/: %@",
-            why, appFiles ? [appFiles componentsJoinedByString:@", "] : @"MISSING",
+        NSMutableArray *pathList = [NSMutableArray array];
+        PyObject *sp = PySys_GetObject("path");
+        if (sp && PyList_Check(sp)) {
+            for (Py_ssize_t i = 0; i < PyList_Size(sp); i++) {
+                const char *u = PyUnicode_AsUTF8(PyList_GetItem(sp, i));
+                if (u) [pathList addObject:[[NSString stringWithUTF8String:u] lastPathComponent]];
+            }
+        }
+        NSString *msg = [NSString stringWithFormat:@"Could not import ios_entry:\n%@\n\nsys.path: %@\napp/: %@\napp_packages/: %@",
+            why, [pathList componentsJoinedByString:@", "], appFiles ? [appFiles componentsJoinedByString:@", "] : @"MISSING",
             pkgFiles ? [pkgFiles componentsJoinedByString:@", "] : @"MISSING"];
         PyEval_SaveThread();
         return msg;
