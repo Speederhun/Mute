@@ -4236,5 +4236,35 @@ def entry(argv=None):
         main(args)
 
 
+def _report_crash():
+    """Started without a console (pythonw / double click) a crash would be silent: write error.log and show the message."""
+    import traceback
+    text = traceback.format_exc()
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(os.path.join(APP_DIR, "error.log"), "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError:
+        pass
+    try:
+        if sys.stderr is not None:
+            sys.stderr.write(text)
+        else:
+            import tkinter
+            from tkinter import messagebox
+            r = tkinter.Tk()
+            r.withdraw()
+            messagebox.showerror("Mute could not start", text[-1500:] + "\n(also saved to " + os.path.join(APP_DIR, "error.log") + ")")
+            r.destroy()
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    entry()
+    try:
+        entry()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception:
+        _report_crash()
+        sys.exit(1)
