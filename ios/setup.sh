@@ -30,7 +30,10 @@ PYEOF
 )
   echo "Downloading $URL"
   mkdir -p Support
-  curl -L --fail "$URL" | tar -xz -C Support
+  # download to a file first, with retries (GitHub sometimes answers 5xx), then unpack
+  curl -L --fail --retry 6 --retry-all-errors --retry-delay 10 -o Support/python-support.tar.gz "$URL"
+  tar -xzf Support/python-support.tar.gz -C Support
+  rm -f Support/python-support.tar.gz
 fi
 
 # 2. Python packages built for iOS (BeeWare publishes iOS wheels of cryptography and cffi)
