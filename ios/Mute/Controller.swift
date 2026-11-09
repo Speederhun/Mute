@@ -64,6 +64,7 @@ final class MuteController: ObservableObject {
     @Published var transfer: Transfer?
     @Published var namePrompt: Peer?
     @Published var call: CallUi?
+    @Published var levels = CallLevels()
     @Published var audio = AudioPrefs()
 
     // look and settings

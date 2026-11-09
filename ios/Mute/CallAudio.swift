@@ -15,10 +15,43 @@ final class CallAudio: @unchecked Sendable {
     private let micQueue = DispatchQueue(label: "mute.mic")
     private var converter: AVAudioConverter?
     private var speaker = false
+    private var useVP = true
+    private var observer: NSObjectProtocol?
+    private var micBlocks = 0, outBlocks = 0, restarts = 0
+    private var lastError = ""
+    private var micFormat = ""
 
     /// Returns an error text or nil.
     func start(speaker: Bool) -> String? {
         stop()
+        self.speaker = speaker
+        micBlocks = 0; outBlocks = 0; restarts = 0; lastError = ""
+        useVP = true
+        var err = build()
+        if err != nil {                                   // voice processing can be refused: try again with the plain microphone
+            teardown()
+            useVP = false
+            err = build()
+        }
+        if err != nil { return err }
+        observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.running else { return }
+            self.restarts += 1
+            self.teardown(keepRunning: true)              // route or format changed (headphones, Bluetooth, voice processing): rebuild
+            if let e = self.build() { self.lastError = e }
+        }
+        let t = Thread { [weak self] in self?.pump() }
+        t.name = "mute.pump"
+        t.qualityOfService = .userInteractive
+        t.start()
+        return nil
+    }
+
+    var diagnostics: String {
+        "mic \(micBlocks) out \(outBlocks) · \(useVP ? "VP" : "plain") \(micFormat)" + (restarts > 0 ? " · restarts \(restarts)" : "") + (lastError.isEmpty ? "" : " · \(lastError)")
+    }
+
+    private func build() -> String? {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
@@ -28,12 +61,13 @@ final class CallAudio: @unchecked Sendable {
 
         let eng = AVAudioEngine()
         let input = eng.inputNode
-        try? input.setVoiceProcessingEnabled(true)          // echo cancellation and noise suppression
+        if useVP { try? input.setVoiceProcessingEnabled(true) }          // echo cancellation and noise suppression
         guard let wire = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false) else {
             return "audio format"
         }
         let inFmt = input.outputFormat(forBus: 0)
         guard inFmt.sampleRate > 0, inFmt.channelCount > 0 else { return "no microphone input" }
+        micFormat = "\(Int(inFmt.sampleRate))Hz/\(inFmt.channelCount)ch"
         converter = AVAudioConverter(from: inFmt, to: wire)
         lock.lock(); ring = []; micPending = []; lock.unlock()
 
@@ -58,22 +92,22 @@ final class CallAudio: @unchecked Sendable {
         engine = eng
         running = true
         setSpeaker(speaker)
-
-        let t = Thread { [weak self] in self?.pump() }
-        t.name = "mute.pump"
-        t.qualityOfService = .userInteractive
-        t.start()
         return nil
     }
 
-    func stop() {
-        guard running || engine != nil else { return }
-        running = false
+    private func teardown(keepRunning: Bool = false) {
+        if !keepRunning { running = false }
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
         converter = nil
         lock.lock(); ring = []; micPending = []; lock.unlock()
+    }
+
+    func stop() {
+        guard running || engine != nil else { return }
+        if let o = observer { NotificationCenter.default.removeObserver(o); observer = nil }
+        teardown()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -110,6 +144,7 @@ final class CallAudio: @unchecked Sendable {
         for b in blocks {
             let data = b.withUnsafeBufferPointer { Data(buffer: $0) }          // little endian on every Apple device
             let s = data.base64EncodedString()
+            micBlocks += 1
             micQueue.async { _ = try? Py.call("audio_in_b64", [s]) }
         }
     }
@@ -128,6 +163,7 @@ final class CallAudio: @unchecked Sendable {
                 let p = raw.bindMemory(to: Int16.self)
                 for i in 0..<floats.count { floats[i] = Float(Int16(littleEndian: p[i])) / 32768 }
             }
+            outBlocks += 1
             lock.lock(); ring.append(contentsOf: floats); lock.unlock()
         }
     }

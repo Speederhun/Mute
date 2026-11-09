@@ -11,6 +11,11 @@ struct CallUi: Equatable {
     var since = Date()
 }
 
+struct CallLevels: Equatable {
+    var micIn = 0.0, out = 0.0
+    var debug = ""
+}
+
 struct AudioPrefs: Equatable {
     var sounds = true
     var soundVolume = 70
@@ -77,8 +82,6 @@ extension MuteController {
         c.speaker.toggle()
         call = c
         CallAudio.shared.setSpeaker(c.speaker)
-        let on = c.speaker
-        Task.detached { _ = try? Py.call("call_duck", [on]) }
     }
 
     /// Push to talk: true while the talk button is held.
@@ -118,7 +121,10 @@ extension MuteController {
             var c = call ?? CallUi(state: "active", fp: fp, name: name)
             c.state = "active"
             c.since = Date()
+            c.speaker = true                                    // loudspeaker by default; voice processing removes the echo
             call = c
+            CallAudio.shared.setSpeaker(true)
+            watchLevels()
         case "remote-mute":
             call?.remoteMuted = (detail == "1")
         default:                                                // the call is over, whatever the reason
@@ -145,6 +151,17 @@ extension MuteController {
         }
     }
 
+    /// Once a second while a call is active: microphone/playback levels from Python plus the audio layer's own counters.
+    private func watchLevels() {
+        Task { @MainActor [weak self] in
+            while let self, self.call?.state == "active" {
+                let info = await Task.detached { (try? Py.dict("call_info")) ?? [:] }.value
+                self.levels = CallLevels(micIn: info.dbl("level_in"), out: info.dbl("level_out"), debug: CallAudio.shared.diagnostics)
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
     func endCallLocally() {
         Sounds.shared.stopLoop()
         CallAudio.shared.stop()
@@ -168,6 +185,9 @@ struct CallPanel: View {
                     Text(String(format: "%d:%02d", s / 60, s % 60) + (call.remoteMuted ? "   (muted on the other side)" : ""))
                         .font(.system(size: 13, design: .monospaced)).foregroundStyle(ctl.theme.dim)
                 }
+                Text(String(format: "mic level %.2f   incoming level %.2f", ctl.levels.micIn, ctl.levels.out))
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(ctl.theme.dim)
+                Text(ctl.levels.debug).font(.system(size: 10, design: .monospaced)).foregroundStyle(ctl.theme.dim)
             }
             switch call.state {
             case "incoming":
