@@ -51,9 +51,27 @@ static NSString *statusMessage(PyStatus status) {
 
     PyObject *module = PyImport_ImportModule("ios_entry");
     if (!module) {
-        PyErr_Print();
+        // say what went wrong: the Python error text (usually "No module named ...") and what the bundle contains
+        NSString *why = @"unknown error";
+        PyObject *type = NULL, *value = NULL, *trace = NULL;
+        PyErr_Fetch(&type, &value, &trace);
+        PyErr_NormalizeException(&type, &value, &trace);
+        if (value) {
+            PyObject *str = PyObject_Str(value);
+            const char *utf8 = str ? PyUnicode_AsUTF8(str) : NULL;
+            const char *tname = type ? ((PyTypeObject *)type)->tp_name : "Error";
+            if (utf8) why = [NSString stringWithFormat:@"%s: %s", tname, utf8];
+            Py_XDECREF(str);
+        }
+        Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(trace);
+        NSError *err = nil;
+        NSArray *appFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app"] error:&err];
+        NSArray *pkgFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app_packages.iphoneos"] error:&err];
+        NSString *msg = [NSString stringWithFormat:@"Could not import ios_entry:\n%@\n\napp/: %@\napp_packages.iphoneos/: %@",
+            why, appFiles ? [appFiles componentsJoinedByString:@", "] : @"MISSING",
+            pkgFiles ? [pkgFiles componentsJoinedByString:@", "] : @"MISSING"];
         PyEval_SaveThread();
-        return @"Could not import ios_entry (is the app code in the bundle? see ios/README.md)";
+        return msg;
     }
     entryCall = PyObject_GetAttrString(module, "call");
     Py_DECREF(module);
