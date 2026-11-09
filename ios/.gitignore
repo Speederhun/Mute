@@ -8,3 +8,4 @@ Mute.xcworkspace/
 build/
 *.xcuserstate
 xcuserdata/
+app_packages/

@@ -66,8 +66,8 @@ static NSString *statusMessage(PyStatus status) {
         Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(trace);
         NSError *err = nil;
         NSArray *appFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app"] error:&err];
-        NSArray *pkgFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app_packages.iphoneos"] error:&err];
-        NSString *msg = [NSString stringWithFormat:@"Could not import ios_entry:\n%@\n\napp/: %@\napp_packages.iphoneos/: %@",
+        NSArray *pkgFiles = [fm contentsOfDirectoryAtPath:[bundlePath stringByAppendingPathComponent:@"app_packages"] error:&err];
+        NSString *msg = [NSString stringWithFormat:@"Could not import ios_entry:\n%@\n\napp/: %@\napp_packages/: %@",
             why, appFiles ? [appFiles componentsJoinedByString:@", "] : @"MISSING",
             pkgFiles ? [pkgFiles componentsJoinedByString:@", "] : @"MISSING"];
         PyEval_SaveThread();

@@ -16,6 +16,16 @@ targets:
     platform: iOS
     sources:
       - path: Mute
+      # the shared Python code and the packages for the SDK being built are staged by the "Copy app code" script and
+      # copied into the app as plain folders; "Install Python" (last build phase) then turns their binary modules into frameworks
+      - path: app
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: app_packages
+        type: folder
+        buildPhase: resources
+        optional: true
     dependencies:
       - framework: Support/Python.xcframework
         embed: true
@@ -61,7 +71,11 @@ targets:
           cp -R "$PROJECT_DIR/../android/python/stem" "$PROJECT_DIR/app/"
           cp "$PROJECT_DIR/python/ios_entry.py" "$PROJECT_DIR/app/"
           find "$PROJECT_DIR/app" -name __pycache__ -prune -exec rm -rf {} +
-    postCompileScripts:
+          # the packages built for this SDK (device or simulator) become app_packages
+          if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then PKGS=app_packages.iphonesimulator; else PKGS=app_packages.iphoneos; fi
+          rm -rf "$PROJECT_DIR/app_packages"
+          cp -R "$PROJECT_DIR/$PKGS" "$PROJECT_DIR/app_packages"
+    postBuildScripts:
       - name: Install Python
         basedOnDependencyAnalysis: false
         script: |
@@ -72,6 +86,5 @@ targets:
             export EXPANDED_CODE_SIGN_IDENTITY_NAME="ad hoc"
           fi
           source "$PROJECT_DIR/Support/Python.xcframework/build/utils.sh"
-          if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then PKGS=app_packages.iphonesimulator; else PKGS=app_packages.iphoneos; fi
-          # copies the standard library and turns every binary module into a signed framework
-          install_python Support/Python.xcframework app "$PKGS"
+          # copies the standard library and turns every binary module (in the bundle's app and app_packages folders) into a signed framework
+          install_python Support/Python.xcframework app app_packages

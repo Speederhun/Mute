@@ -73,7 +73,8 @@ for TARGET in iphoneos iphonesimulator; do
   fi
 done
 
-# 3. Xcode project + Tor pod
+# 3. Xcode project + Tor pod (app/ and app_packages/ are filled by the build; they only have to exist for the project)
+mkdir -p app app_packages
 xcodegen generate
 pod install
 echo
