@@ -37,8 +37,7 @@ final class CallAudio: @unchecked Sendable {
         observer = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] _ in
             guard let self, self.running else { return }
             self.restarts += 1
-            self.teardown(keepRunning: true)              // route or format changed (headphones, Bluetooth, voice processing): rebuild
-            if let e = self.build() { self.lastError = e }
+            self.reconfigure(attempt: 0)
         }
         let t = Thread { [weak self] in self?.pump() }
         t.name = "mute.pump"
@@ -93,6 +92,35 @@ final class CallAudio: @unchecked Sendable {
         running = true
         setSpeaker(speaker)
         return nil
+    }
+
+    /// The route or format changed (loudspeaker, headphones, Bluetooth, voice processing) and the engine stopped.
+    /// Keep the same engine and its nodes: re-read the microphone format, put the tap back and start again.
+    /// The format can read as 0 Hz for a moment, so retry a few times.
+    private func reconfigure(attempt: Int) {
+        guard running, let eng = engine else { return }
+        let input = eng.inputNode
+        input.removeTap(onBus: 0)
+        let inFmt = input.outputFormat(forBus: 0)
+        if inFmt.sampleRate > 0, inFmt.channelCount > 0,
+           let wire = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false) {
+            micFormat = "\(Int(inFmt.sampleRate))Hz/\(inFmt.channelCount)ch"
+            converter = AVAudioConverter(from: inFmt, to: wire)
+            lock.lock(); micPending = []; lock.unlock()
+            input.installTap(onBus: 0, bufferSize: 1024, format: inFmt) { [weak self] buf, _ in
+                self?.capture(buf, wire: wire)
+            }
+            do {
+                if !eng.isRunning { try eng.start() }
+                lastError = ""
+                return
+            } catch { lastError = "restart: \(error.localizedDescription)" }
+        } else {
+            lastError = "no microphone input (try \(attempt + 1))"
+        }
+        if attempt < 8 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.reconfigure(attempt: attempt + 1) }
+        }
     }
 
     private func teardown(keepRunning: Bool = false) {
